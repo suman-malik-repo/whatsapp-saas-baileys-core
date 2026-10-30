@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Link WhatsApp</title>
+    <link rel="stylesheet" href="/qr/assets/qr.css">
+    <script src="/qr/assets/qr.js" defer></script>
+  </head>
+  <body>
+    <main class="pairing-page">
+      <header class="page-header">
+        <span class="service-name"><span class="service-mark" aria-hidden="true"></span>WhatsApp server</span>
+        <span id="connection-status" class="connection-status" data-state="idle" role="status">Ready to pair</span>
+      </header>
+
+      <div class="pairing-layout">
+        <section class="pairing-guide" aria-labelledby="page-title">
+          <h1 id="page-title">Link your<br> WhatsApp.</h1>
+          <p class="intro">Scan a code from your phone to connect this server to your WhatsApp account.</p>
+
+          <form id="pairing-form" class="key-form" method="post" action="/qr">
+            <label for="api-key">Server API key</label>
+            <input id="api-key" name="api-key" type="password" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="key-hint">
+            <p id="key-hint" class="field-hint">The key stays in this page and is cleared when you leave.</p>
+            <button id="show-qr" class="button button-primary" type="submit">Show QR code</button>
+          </form>
+
+          <div class="instructions">
+            <h2>On your phone</h2>
+            <ol>
+              <li>Open WhatsApp.</li>
+              <li>Go to <strong>Linked devices</strong> in Settings or the menu.</li>
+              <li>Tap <strong>Link a device</strong> and scan the code.</li>
+            </ol>
+          </div>
+        </section>
+
+        <section class="pairing-code" aria-labelledby="code-heading" aria-busy="false">
+          <div class="code-heading">
+            <h2 id="code-heading">Pairing code</h2>
+            <span id="expires-in" class="expiry" aria-live="off"></span>
+          </div>
+
+          <div class="qr-frame">
+            <img id="qr-image" class="qr-image" width="320" height="320" alt="WhatsApp pairing QR code. Scan this using Linked devices on your phone." hidden>
+            <div id="qr-placeholder" class="qr-placeholder">
+              <svg id="placeholder-icon" class="placeholder-icon" width="64" height="64" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+                <path d="M8 24V8h16M40 8h16v16M56 40v16H40M24 56H8V40" stroke="currentColor" stroke-width="3"/>
+                <path d="M23 23h18v18H23z" stroke="currentColor" stroke-width="3" stroke-dasharray="5 5"/>
+              </svg>
+              <p id="placeholder-text">Enter your API key<br>to show a QR code.</p>
+            </div>
+          </div>
+
+          <p id="pairing-detail" class="pairing-detail">Keep this page open while you link your phone.</p>
+          <p id="feedback" class="feedback" role="alert" hidden></p>
+          <button id="refresh-qr" class="button button-secondary" type="button" hidden>Generate fresh QR</button>
+
+          <div id="raw-qr" class="raw-qr" hidden>
+            <div class="raw-heading">
+              <label for="qr-text">QR code text</label>
+              <button id="copy-qr" class="text-button" type="button">Copy text</button>
+            </div>
+            <textarea id="qr-text" rows="4" readonly spellcheck="false" aria-describedby="raw-hint"></textarea>
+            <p id="raw-hint" class="field-hint">Use this text to generate the same QR code in another service.</p>
+            <p id="copy-status" class="copy-status" role="status"></p>
+          </div>
+        </section>
+      </div>
+
+      <footer>Pairing status updates automatically.</footer>
+      <noscript><p class="noscript">Enable JavaScript to request and display a pairing code.</p></noscript>
+    </main>
+  </body>
+</html>

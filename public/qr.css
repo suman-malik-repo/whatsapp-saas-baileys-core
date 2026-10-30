@@ -1,0 +1,98 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  color: #182e36;
+  background: #fff;
+  font-synthesis: none;
+  --ink: #182e36;
+  --muted: #60747b;
+  --teal: #087c68;
+  --pale: #edf7f3;
+  --line: #dbe6e8;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; }
+button, input, textarea { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: wait; opacity: .65; }
+button:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 3px solid #129981;
+  outline-offset: 4px;
+}
+
+.pairing-page { width: min(1080px, calc(100% - 80px)); margin: 0 auto; }
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 108px;
+  border-bottom: 1px solid var(--line);
+}
+.service-name { display: inline-flex; align-items: center; gap: 12px; font-size: 16px; font-weight: 650; }
+.service-mark { display: inline-block; width: 16px; height: 22px; border: 3px solid var(--teal); border-radius: 4px; }
+.connection-status { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
+.connection-status::before { content: ""; width: 7px; height: 7px; background: #899ba1; border-radius: 50%; flex-shrink: 0; }
+.connection-status[data-state="connected"] { color: var(--teal); }
+.connection-status[data-state="connected"]::before, .connection-status[data-state="qr_required"]::before { background: var(--teal); }
+.connection-status[data-state="failed"]::before, .connection-status[data-state="logged_out"]::before { background: #b64d35; }
+.pairing-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 100px; padding: 68px 0 64px; align-items: start; }
+h1 { margin: 0 0 22px; font-size: clamp(40px, 5vw, 60px); font-weight: 650; line-height: 1.08; letter-spacing: -2.4px; }
+.intro { color: var(--muted); font-size: 18px; line-height: 1.6; max-width: 355px; margin: 0; }
+.key-form { display: grid; gap: 10px; margin-top: 34px; max-width: 355px; }
+.key-form label, .raw-heading label { font-size: 14px; font-weight: 650; }
+.key-form input { width: 100%; min-height: 46px; border: 1px solid #a9babe; border-radius: 5px; padding: 10px 12px; color: var(--ink); background: #fff; }
+.field-hint { font-size: 12px; line-height: 1.5; color: var(--muted); margin: 0; }
+.button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 11px 18px; border: 1px solid transparent; border-radius: 5px; font-size: 14px; font-weight: 650; line-height: 1.4; }
+.button-primary { margin-top: 6px; background: var(--teal); color: #fff; }
+.button-primary:hover:not(:disabled) { background: #066454; }
+.button-secondary { background: #fff; color: var(--teal); border-color: #a9c8bf; width: 100%; margin-top: 12px; }
+.button-secondary:hover:not(:disabled) { background: var(--pale); }
+.instructions { margin-top: 36px; }
+.instructions h2, .code-heading h2 { font-size: 16px; font-weight: 650; margin: 0; }
+.instructions ol { margin: 14px 0 0; padding-left: 20px; color: var(--muted); font-size: 14px; line-height: 1.65; }
+.instructions li { padding-left: 5px; margin: 8px 0; }
+.instructions strong { color: var(--ink); font-weight: 600; }
+.pairing-code { min-width: 0; }
+.code-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin: 2px 0 16px; }
+.expiry { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.qr-frame { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 364px; border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 21px; }
+.qr-image { width: 320px; max-width: 100%; height: auto; aspect-ratio: 1; display: block; }
+.qr-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 320px; text-align: center; color: #70898e; width: 100%; }
+.placeholder-icon { margin-bottom: 12px; }
+.qr-placeholder p { font-size: 15px; line-height: 1.6; margin: 0; max-width: 245px; }
+.pairing-detail { font-size: 13px; line-height: 1.6; color: var(--muted); margin: 14px 0 0; }
+.feedback { color: #98402d; background: #fff5f1; border-left: 3px solid #bb6049; padding: 10px 12px; font-size: 13px; line-height: 1.6; margin: 12px 0 0; overflow-wrap: anywhere; }
+.raw-qr { border-top: 1px solid var(--line); margin-top: 28px; padding-top: 20px; }
+.raw-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.text-button { color: var(--teal); background: transparent; border: 0; padding: 5px 0; font-size: 13px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+.raw-qr textarea { width: 100%; display: block; border: 1px solid var(--line); border-radius: 5px; padding: 12px; background: #f7faf9; color: var(--ink); font-family: Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.55; resize: vertical; overflow-wrap: anywhere; word-break: break-all; }
+.raw-qr .field-hint { margin-top: 9px; }
+.copy-status { font-size: 12px; color: var(--teal); margin: 7px 0 0; min-height: 18px; }
+footer { border-top: 1px solid var(--line); padding: 22px 0 28px; color: var(--muted); font-size: 12px; }
+.noscript { color: #98402d; line-height: 1.5; }
+
+@media (max-width: 880px) {
+  .pairing-page { width: min(760px, calc(100% - 48px)); }
+  .pairing-layout { gap: 44px; grid-template-columns: minmax(0, 1fr) minmax(344px, 1fr); padding-top: 48px; }
+  .qr-frame { padding: 14px; min-height: 328px; }
+  .qr-placeholder { min-height: 298px; }
+  h1 { font-size: 46px; }
+}
+
+@media (max-width: 680px) {
+  .pairing-page { width: min(440px, calc(100% - 36px)); }
+  .page-header { min-height: 80px; gap: 12px; }
+  .service-name { font-size: 14px; gap: 9px; }
+  .connection-status { font-size: 12px; gap: 6px; }
+  .pairing-layout { grid-template-columns: minmax(0, 1fr); gap: 38px; padding: 36px 0 40px; }
+  h1 { font-size: 44px; letter-spacing: -1.7px; margin-bottom: 16px; }
+  h1 br { display: none; }
+  .intro { font-size: 16px; max-width: none; }
+  .key-form { max-width: none; margin-top: 24px; }
+  .instructions { margin-top: 26px; }
+  .qr-frame { min-height: 344px; padding: 12px; }
+  .qr-placeholder { min-height: 318px; }
+}
