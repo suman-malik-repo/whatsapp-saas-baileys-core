@@ -1,0 +1,361 @@
+{
+  "info": {
+    "name": "Baileys WhatsApp message API",
+    "description": "Send messages by phone number. Set baseUrl, apiKey and phone before sending. Replace example.com media URLs with direct public file URLs. The upload example requires selecting a local file. All sends are POST and use x-api-key authentication.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "apiKey",
+      "value": "YOUR_API_KEY",
+      "type": "string"
+    },
+    {
+      "key": "phone",
+      "value": "12025550123",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Text",
+      "request": {
+        "description": "Send one text message. Required: phone (string with country code), message (nonblank string, at most 4096 code units). type may be omitted or set to text. Set collection variables before sending.",
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"message\": \"Hello from Postman\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/api/send"
+      }
+    },
+    {
+      "name": "Image URL",
+      "request": {
+        "description": "Send a JPEG, PNG, or WebP image from a public direct file URL. Required: phone, type=image, url. Optional: caption (at most 1024 code units), mimetype, viewOnce (boolean). Maximum file size: 10 MiB. Replace the example.com URL.",
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"type\": \"image\",\n  \"url\": \"https://example.com/photo.jpg\",\n  \"caption\": \"Here is the photo\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/api/send"
+      }
+    },
+    {
+      "name": "Video URL",
+      "request": {
+        "description": "Send a prepared MP4 video from a public direct file URL. Required: phone, type=video, url. Optional: caption, mimetype, gifPlayback, viewOnce. Boolean flags use JSON booleans. Maximum file size: 50 MiB. gifPlayback requests GIF-style playback; it does not convert a GIF. Replace the placeholder URL.",
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"type\": \"video\",\n  \"url\": \"https://example.com/clip.mp4\",\n  \"caption\": \"Here is the video\",\n  \"gifPlayback\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/api/send"
+      }
+    },
+    {
+      "name": "Audio URL",
+      "request": {
+        "description": "Send audio from a public direct file URL. Required: phone, type=audio, url. Optional: mimetype, ptt, seconds (number from 0 through 86400), viewOnce. ptt=true requires actual Ogg/Opus content. Captions are not accepted for audio. Maximum file size: 16 MiB. Replace the placeholder URL.",
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"type\": \"audio\",\n  \"url\": \"https://example.com/audio.mp3\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/api/send"
+      }
+    },
+    {
+      "name": "Voice note URL",
+      "request": {
+        "description": "Send an Ogg/Opus voice note from a public direct file URL. Required: phone, type=voice, url. Optional: mimetype, seconds, viewOnce. ptt is set automatically; do not add it as a field for this type. No automatic transcoding or captions. Maximum file size: 16 MiB. Replace the placeholder URL.",
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"type\": \"voice\",\n  \"url\": \"https://example.com/voice.opus\",\n  \"seconds\": 12\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/api/send"
+      }
+    },
+    {
+      "name": "Document URL",
+      "request": {
+        "description": "Send a document from a public direct file URL. Required: phone, type=document, url. Optional: caption, mimetype, fileName. fileName defaults to the URL basename; supply a filename without directory separators if needed. Maximum file size: 100 MiB. HTML preview/login pages are rejected. Replace the placeholder URL.",
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"type\": \"document\",\n  \"url\": \"https://example.com/invoice.pdf\",\n  \"fileName\": \"invoice.pdf\",\n  \"caption\": \"Your invoice\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/api/send"
+      }
+    },
+    {
+      "name": "Sticker URL",
+      "request": {
+        "description": "Send a prepared WhatsApp-compatible WebP sticker. Required: phone, type=sticker, url. Optional: mimetype, isAnimated. isAnimated describes the file and does not create animation. Captions and viewOnce are not accepted. Maximum file size: 1 MiB. Replace the placeholder URL.",
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"type\": \"sticker\",\n  \"url\": \"https://example.com/sticker.webp\",\n  \"isAnimated\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/api/send"
+      }
+    },
+    {
+      "name": "Static location",
+      "request": {
+        "description": "Send one static location pin. Required: phone, type=location, location.latitude (number -90 through 90), location.longitude (number -180 through 180). Optional inside location: name, address. Coordinates must be JSON numbers, not strings. This does not start live location sharing.",
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"type\": \"location\",\n  \"location\": {\n    \"latitude\": 22.5726,\n    \"longitude\": 88.3639,\n    \"name\": \"Meeting point\",\n    \"address\": \"Kolkata, India\"\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/api/send"
+      }
+    },
+    {
+      "name": "Contact cards",
+      "request": {
+        "description": "Send 1 to 20 contact cards. Required: recipient phone, type=contacts, contacts array with name and phone strings for each card. Optional per contact: organization, email. Optional top-level displayName labels multiple cards. Edit the card's own number separately from the recipient collection variable. The server generates vCards.",
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"type\": \"contacts\",\n  \"contacts\": [\n    {\n      \"name\": \"Alex Example\",\n      \"phone\": \"12025550124\",\n      \"organization\": \"Example Company\",\n      \"email\": \"alex@example.com\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/api/send"
+      }
+    },
+    {
+      "name": "Poll",
+      "request": {
+        "description": "Send a poll. Required: phone, type=poll, poll.name, poll.options (2 to 12 distinct nonblank strings). Optional poll.selectableCount is an integer from 1 through the option count, default 1. Names are at most 256 code units; options at most 100 each. Options must be unique ignoring case and surrounding whitespace. This request does not collect or query votes.",
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"type\": \"poll\",\n  \"poll\": {\n    \"name\": \"Which time works for you?\",\n    \"options\": [\n      \"Morning\",\n      \"Afternoon\",\n      \"Evening\"\n    ],\n    \"selectableCount\": 1\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/api/send"
+      }
+    },
+    {
+      "name": "Image file upload",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          }
+        ],
+        "description": "Select a JPEG, PNG, or WebP image in the file row (maximum 10 MiB). Leave Content-Type unset so Postman supplies the multipart boundary. Exactly one file named file is required. Multipart flags use lowercase text true/false. To adapt this request to another media type, also delete or disable incompatible optional rows: remove caption for audio/voice; remove viewOnce for document; remove both for sticker. See docs/MESSAGE_API.md for all per-type fields and limits.",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "phone",
+              "value": "{{phone}}",
+              "type": "text"
+            },
+            {
+              "key": "type",
+              "value": "image",
+              "type": "text"
+            },
+            {
+              "key": "file",
+              "type": "file",
+              "src": []
+            },
+            {
+              "key": "caption",
+              "value": "Uploaded from Postman",
+              "type": "text"
+            },
+            {
+              "key": "viewOnce",
+              "value": "false",
+              "type": "text"
+            }
+          ]
+        },
+        "url": "{{baseUrl}}/api/send"
+      }
+    }
+  ]
+}

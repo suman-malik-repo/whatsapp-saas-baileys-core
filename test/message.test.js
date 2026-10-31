@@ -17,10 +17,7 @@ function loadModule(relativePath, mocks) {
 }
 
 function loadController(getSocket) {
- return loadModule("../controllers/sendMessage.js", {
-  "../config/socket": { getSocket },
-  "../utils/formatPhone": formatPhone
- })
+ return require("../controllers/sendMessage").createSendMessage({ getSocket })
 }
 
 function response() {
@@ -115,6 +112,7 @@ test("send route only permits POST and never sends for other HTTP methods", asyn
  let sends = 0
  const router = loadModule("../routes/messageRoutes.js", {
   express,
+  "../middleware/mediaUpload": (req, res, next) => next(),
   "../controllers/sendMessage": (req, res) => { sends++; res.json({ success: true }) }
  })
  const app = express()

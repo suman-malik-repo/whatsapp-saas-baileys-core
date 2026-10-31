@@ -1,9 +1,18 @@
 # Baileys WhatsApp testing server
 
-One linked WhatsApp account sends individual text messages over an HTTP API.
+One linked WhatsApp account sends text, images, video, audio/voice notes,
+documents, stickers, locations, contact cards, and polls over an HTTP API.
 Node.js 24 was used to verify this project.
 Baileys is pinned to the tested security release `7.0.0-rc14`; the lockfile
 records the patched dependency versions. Use `npm ci` for repeatable installs.
+
+## Documentation
+
+- [Message API usage](docs/MESSAGE_API.md): setup, every request type, required
+  and optional fields, Postman, cURL, PowerShell, backend examples, and errors.
+- [Postman collection](postman/Baileys-WhatsApp.postman_collection.json): import
+  it and set `baseUrl`, `apiKey`, and `phone` to try the message requests.
+- Pairing and readiness are documented below in this README.
 
 ## Start
 
@@ -31,6 +40,12 @@ Keep that directory on persistent storage and run one process per session.
 
 ## Send a message
 
+Every type uses `POST /api/send` with a recipient `phone`. Add `type` for a
+non-text message. Media accepts a public URL in JSON or a streamed multipart
+`file` upload. See the [message API guide](docs/MESSAGE_API.md) for every request
+shape, optional field, format, and size limit. You can also import the
+[Postman collection](postman/Baileys-WhatsApp.postman_collection.json).
+
 ```http
 POST /api/send
 Content-Type: application/json
@@ -45,8 +60,8 @@ are accepted. The normalized number must contain 7–15 digits and cannot start
 with zero. Letters, groups, and WhatsApp JIDs are rejected. This validates the
 number's shape; it does not verify that the number has a WhatsApp account.
 
-`message` must be a nonblank string of at most 4096 JavaScript string code
-units. Its original spacing and content are preserved.
+For text requests, `message` must be a nonblank string of at most 4096
+JavaScript string code units. Its original spacing and content are preserved.
 
 Example success:
 
@@ -67,10 +82,11 @@ from a query parameter.
 | `400` | Invalid input or malformed JSON |
 | `401` | Missing or incorrect `x-api-key` |
 | `405` | Sending attempted with a method other than POST |
-| `413` | JSON request body exceeds 32 KB |
-| `415` | Unsupported request encoding |
-| `502` | WhatsApp send failed while the connection still appeared ready |
+| `413` | Request or media exceeds its size limit |
+| `415` | Unsupported request encoding or media format |
+| `502` | Media retrieval or WhatsApp send failed |
 | `503` | WhatsApp is not connected |
+| `504` | Media retrieval timed out |
 
 ## Pair from a browser or another service
 

@@ -12,7 +12,9 @@
   "description": "",
   "dependencies": {
     "@whiskeysockets/baileys": "7.0.0-rc14",
+    "busboy": "^1.6.0",
     "express": "^5.2.1",
+    "file-type": "^21.3.4",
     "pino": "^10.3.1",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0"

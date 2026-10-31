@@ -46,6 +46,14 @@ function createApp(options = {}) {
    return res.status(413).json({ success: false, error: "Request body is too large" })
   }
 
+  if (error.status === 415 && ["encoding.unsupported", "charset.unsupported"].includes(error.type)) {
+   return res.status(415).json({ success: false, error: "Unsupported request encoding" })
+  }
+
+  if (error.expose === true && [400, 408, 413, 415, 502, 504].includes(error.status)) {
+   return res.status(error.status).json({ success: false, error: error.message })
+  }
+
   if (error.status === 415) {
    return res.status(415).json({ success: false, error: "Unsupported request encoding" })
   }
