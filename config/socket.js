@@ -4,7 +4,8 @@ const { randomUUID } = require("node:crypto")
 const {
  default: makeWASocket,
  useMultiFileAuthState,
- DisconnectReason
+ DisconnectReason,
+ proto
 } = require("@whiskeysockets/baileys")
 const qrcode = require("qrcode-terminal")
 const P = require("pino")
@@ -44,6 +45,97 @@ let qrPreparation = null
 let authMaintenance = null
 let maintenanceStart = null
 const qrWaiters = new Set()
+const connectionListeners = new Set()
+const messageUpdateListeners = new Set()
+const messageUpdateHandlers = new WeakMap()
+let lastPublishedConnection = null
+
+function callSubscriber(listener, value) {
+ try {
+  const result = listener({ ...value })
+  if (result && typeof result.catch === "function") {
+   result.catch(() => console.error("WhatsApp status subscriber failed"))
+  }
+ } catch {
+  console.error("WhatsApp status subscriber failed")
+ }
+}
+
+function publishConnection() {
+ const snapshot = getConnectionStatus()
+ const serialized = JSON.stringify(snapshot)
+ if (serialized === lastPublishedConnection) return
+ lastPublishedConnection = serialized
+ for (const listener of [...connectionListeners]) callSubscriber(listener, snapshot)
+}
+
+function subscribeConnection(listener) {
+ if (typeof listener !== "function") throw new TypeError("Connection subscriber must be a function")
+ connectionListeners.add(listener)
+ callSubscriber(listener, getConnectionStatus())
+ return () => connectionListeners.delete(listener)
+}
+
+function subscribeMessageUpdates(listener) {
+ if (typeof listener !== "function") throw new TypeError("Message subscriber must be a function")
+ messageUpdateListeners.add(listener)
+ return () => messageUpdateListeners.delete(listener)
+}
+
+function publishMessageUpdate(key, status) {
+ // Only acknowledgements for outbound messages can advance a queued send.
+ // Do not expose the raw Baileys event, participant data, or message content.
+ if (key?.fromMe !== true || typeof key.id !== "string" || !/^[A-Za-z0-9_.-]{1,256}$/.test(key.id)) return
+ const update = { messageId: key.id, status }
+ if (typeof key.remoteJid === "string" && key.remoteJid.length <= 256 && !/[\s\x00-\x1f\x7f]/.test(key.remoteJid)) {
+  update.remoteJid = key.remoteJid
+ }
+ for (const listener of [...messageUpdateListeners]) callSubscriber(listener, update)
+}
+
+function hasReceiptTimestamp(value) {
+ try {
+  const timestamp = typeof value === "number" ? value : value?.toNumber?.()
+  return Number.isFinite(timestamp) && timestamp > 0
+ } catch {
+  return false
+ }
+}
+
+function attachMessageUpdates(currentSocket, isCurrent) {
+ const statuses = proto.WebMessageInfo.Status
+ const onMessagesUpdate = (updates) => {
+  if (!isCurrent() || !Array.isArray(updates)) return
+  for (const entry of updates) {
+   if (!isCurrent()) break
+   const status = entry?.update?.status
+   if (status === statuses.READ || status === statuses.PLAYED) publishMessageUpdate(entry.key, "read")
+   else if (status === statuses.DELIVERY_ACK) publishMessageUpdate(entry.key, "delivered")
+   // ERROR and SERVER_ACK do not prove recipient delivery or a safe resend.
+  }
+ }
+ const onReceiptUpdate = (updates) => {
+  if (!isCurrent() || !Array.isArray(updates)) return
+  for (const entry of updates) {
+   if (!isCurrent()) break
+   const receipt = entry?.receipt
+   if (hasReceiptTimestamp(receipt?.readTimestamp) || hasReceiptTimestamp(receipt?.playedTimestamp)) {
+    publishMessageUpdate(entry.key, "read")
+   } else if (hasReceiptTimestamp(receipt?.receiptTimestamp)) publishMessageUpdate(entry.key, "delivered")
+  }
+ }
+ currentSocket.ev.on("messages.update", onMessagesUpdate)
+ currentSocket.ev.on("message-receipt.update", onReceiptUpdate)
+ messageUpdateHandlers.set(currentSocket, { onMessagesUpdate, onReceiptUpdate })
+}
+
+function detachMessageUpdates(currentSocket) {
+ const handlers = messageUpdateHandlers.get(currentSocket)
+ if (!handlers) return
+ messageUpdateHandlers.delete(currentSocket)
+ currentSocket.ev.off("messages.update", handlers.onMessagesUpdate)
+ currentSocket.ev.off("message-receipt.update", handlers.onReceiptUpdate)
+}
 
 function clearQr() {
  qr = null
@@ -73,6 +165,7 @@ function disconnectCode(error) {
 
 function closeTransport(currentSocket) {
  if (!currentSocket) return
+ detachMessageUpdates(currentSocket)
  try {
   // end closes this connection without revoking the linked WhatsApp session.
   const closing = currentSocket.end(new Error("WhatsApp connection closed locally"))
@@ -93,6 +186,7 @@ function scheduleReconnect(code) {
 
  if (terminalDisconnects.has(code)) {
   state = code === DisconnectReason.loggedOut ? "logged_out" : "failed"
+  publishConnection()
   console.error("WhatsApp connection requires manual attention; disconnect code:", code)
   finishQrRequests()
   return
@@ -111,6 +205,7 @@ function scheduleReconnect(code) {
   nextRetryAt = null
   if (running) void startWhatsApp()
  }, delay)
+ publishConnection()
 }
 
 function startWhatsApp() {
@@ -121,6 +216,7 @@ function startWhatsApp() {
    running = true
    state = "connecting"
    generation += 1
+   publishConnection()
   }
   const requestedGeneration = generation
   const pendingStart = authMaintenance.then(() => {
@@ -144,6 +240,7 @@ function startWhatsApp() {
  socketHasQr = false
  refreshingGeneration = null
  const attempt = ++generation
+ publishConnection()
  const previousInitialization = initialization
  initializationGeneration = attempt
 
@@ -167,6 +264,7 @@ function startWhatsApp() {
   })
   socket = currentSocket
   const isCurrent = () => running && attempt === generation && socket === currentSocket
+  attachMessageUpdates(currentSocket, isCurrent)
 
   currentSocket.ev.on("creds.update", (update) => {
    if (!isCurrent()) return
@@ -185,6 +283,7 @@ function startWhatsApp() {
     socket = null
     clearQr()
     if (running) state = "failed"
+    publishConnection()
     finishQrRequests()
     closeTransport(failedSocket)
     // Do not reconnect using credentials that failed to persist. Fix storage
@@ -231,6 +330,7 @@ function startWhatsApp() {
    } else if (update.connection === "connecting" && !qr) {
     state = "connecting"
    }
+   publishConnection()
   })
 
   return currentSocket
@@ -261,6 +361,7 @@ function stopWhatsApp() {
  socket = null
  clearQr()
  state = "stopped"
+ publishConnection()
  finishQrRequests()
  closeTransport(currentSocket)
  return credentialsQueue
@@ -280,6 +381,7 @@ async function prepareQr(fresh) {
   clearReconnect()
   clearQr()
   state = "connecting"
+  publishConnection()
   const maintenance = Promise.resolve(previousInitialization).then(async () => {
    await credentialsQueue
    if (!running || attempt !== generation || credentialsFailed) return false
@@ -299,12 +401,14 @@ async function prepareQr(fresh) {
    pairingInProgress = false
    lastDisconnectCode = null
    reconnectAttempts = 0
+   publishConnection()
    if (!running || attempt !== generation || credentialsFailed) return false
    return true
   }).catch(() => {
    if (running && attempt === generation) {
     state = "failed"
     clearQr()
+    publishConnection()
     finishQrRequests()
     console.error("WhatsApp session could not be archived; repair storage before pairing")
    }
@@ -345,6 +449,7 @@ async function prepareQr(fresh) {
   socket = null
   clearReconnect()
   state = "connecting"
+  publishConnection()
   closeTransport(previousSocket)
  }
 
@@ -379,6 +484,7 @@ function requestQr({ fresh = true, timeoutMs = 15000 } = {}) {
    if (running && !credentialsFailed) {
     state = "failed"
     clearQr()
+    publishConnection()
     finishQrRequests()
    }
   }).finally(() => {
@@ -403,4 +509,7 @@ function getConnectionStatus() {
  }
 }
 
-module.exports = { startWhatsApp, stopWhatsApp, getSocket, getConnectionStatus, getQrStatus, requestQr }
+module.exports = {
+ startWhatsApp, stopWhatsApp, getSocket, getConnectionStatus, getQrStatus, requestQr,
+ subscribeConnection, subscribeMessageUpdates
+}

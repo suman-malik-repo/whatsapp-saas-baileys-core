@@ -68,8 +68,8 @@ test("audio and voice support optional duration and view-once with Opus enforcem
  assert.deepEqual(content, { ptt: false, seconds: 0, viewOnce: false, mimetype: "audio/mpeg" })
  assert.equal(media.kind, "audio")
  assert.equal(media.ptt, false)
- const voice = build(request("voice", { url: "https://example.com/note.opus", seconds: 4.25, viewOnce: true }))
- assert.deepEqual(voice.content, { ptt: true, seconds: 4.25, viewOnce: true, mimetype: "audio/ogg; codecs=opus" })
+ const voice = build(request("voice", { url: "https://example.com/note.opus", seconds: 4, viewOnce: true }))
+ assert.deepEqual(voice.content, { ptt: true, seconds: 4, viewOnce: true, mimetype: "audio/ogg; codecs=opus" })
  assert.equal(voice.media.kind, "audio")
  assert.equal(voice.media.requestedType, "voice")
  assert.equal(voice.media.ptt, true)
@@ -82,7 +82,7 @@ test("audio and voice support optional duration and view-once with Opus enforcem
   }
  }
  invalid(request("voice", { url: "https://example.com/note.ogg", ptt: false }))
- for (const seconds of [-1, NaN, Infinity, "1", 86401, {}, null]) {
+ for (const seconds of [-1, 0.5, 4.25, NaN, Infinity, "1", 86401, {}, null]) {
   invalid(request("audio", { url: "https://example.com/song.mp3", seconds }))
  }
  assert.equal(build(request("audio", { url: "https://example.com/song.mp3", seconds: 86400 })).content.seconds, 86400)
@@ -107,6 +107,9 @@ test("document MIME and filename are inferred, or use the supplied optional fiel
 test("stickers accept WebP and preserve animation intent", () => {
  const result = build(request("sticker", { url: "https://example.com/sticker.webp", isAnimated: true }))
  assert.deepEqual(result.content, { mimetype: "image/webp", isAnimated: true })
+ assert.equal(result.media.isAnimated, true)
+ assert.equal(build(request("sticker", { url: "https://example.com/sticker.webp", isAnimated: false })).media.isAnimated, false)
+ assert.equal(Object.hasOwn(build(request("sticker", { url: "https://example.com/sticker.webp" })).media, "isAnimated"), false)
  assert.equal(result.media.maxBytes, 1024 * 1024)
  invalid(request("sticker", { url: "https://example.com/sticker.png" }), null, 400, /WebP|webp/)
  invalid(request("sticker", { url: "https://example.com/sticker.webp", isAnimated: "true" }))
@@ -140,14 +143,14 @@ test("MIME types are inferred per source and explicit MIME must match the reques
 
 test("uploads use source metadata and coerce only multipart boolean and numeric fields", () => {
  const file = upload({ originalname: "voice.opus", mimetype: "audio/ogg; codecs=opus" })
- const result = build(request("voice", { seconds: "1.5", viewOnce: "false" }), file)
- assert.deepEqual(result.content, { ptt: true, seconds: 1.5, viewOnce: false, mimetype: "audio/ogg; codecs=opus" })
+ const result = build(request("voice", { seconds: "1", viewOnce: "false" }), file)
+ assert.deepEqual(result.content, { ptt: true, seconds: 1, viewOnce: false, mimetype: "audio/ogg; codecs=opus" })
  assert.equal(result.media.file, file)
  assert.equal(Object.hasOwn(result.media, "url"), false)
  assert.equal(build(request("video", { gifPlayback: "true", viewOnce: "false" }), upload({ originalname: "movie.mp4", mimetype: "video/mp4" })).content.gifPlayback, true)
  assert.equal(build(request("document"), upload({ originalname: "report.pdf", mimetype: "application/octet-stream" })).content.fileName, "report.pdf")
  assert.equal(build(request("document"), upload({ originalname: "report.pdf", mimetype: "application/octet-stream" })).content.mimetype, "application/pdf")
- for (const seconds of ["", " ", "NaN", "Infinity", "0x10", "1e2", "-1"]) {
+ for (const seconds of ["", " ", "NaN", "Infinity", "0x10", "1e2", "-1", "1.5", "1.0", "+1", "1\n"]) {
   invalid(request("voice", { seconds }), file)
  }
  for (const viewOnce of ["1", "0", "TRUE", "False", 1, null, []]) {
@@ -239,4 +242,71 @@ test("poll validation rejects duplicates, ambiguous counts, oversized options an
  for (const selectableCount of [0, -1, 3, 1.5, "1", null, NaN, Infinity]) {
   invalid(request("poll", { poll: { name: "Choose", options: ["A", "B"], selectableCount } }))
  }
+})
+
+test("all user-facing strings reject malformed Unicode and unsafe controls while text keeps normal line breaks", () => {
+ const unsafe = ["bad\u0000text", "bad\u0008text", "bad\u000btext", "bad\u001ftext", "bad\u007ftext", "bad\u0085text", "bad\u009ftext", "bad\ud800text", "bad\udc00text"]
+ for (const value of unsafe) {
+  invalid({ phone, message: value })
+  invalid(request("image", { url: "https://example.com/p.jpg", caption: value }))
+  invalid(request("contacts", { contacts: [{ name: value, phone }] }))
+ }
+ const text = "Hello 😀\tteam\r\nनमस्ते\nمرحبا"
+ assert.equal(build({ phone, message: text }).content.text, text)
+ assert.equal(build(request("image", { url: "https://example.com/p.jpg", caption: text })).content.caption, text)
+ for (const name of ["Alice\tTeam", "Alice\rTeam", "Alice\nTeam"]) {
+  invalid(request("contacts", { contacts: [{ name, phone }] }))
+ }
+})
+
+test("required strings reject invisible-only content without rewriting valid content", () => {
+ for (const invisible of ["\u200b", " \u200c\u200d\ufeff\u2060\ufe0f ", "\u00ad"]) {
+  invalid({ phone, message: invisible })
+  invalid(request("contacts", { contacts: [{ name: invisible, phone }] }))
+  invalid(request("poll", { poll: { name: "Choose", options: ["A", invisible] } }))
+ }
+ const message = " \u200dHello 👩‍💻\u200b "
+ assert.equal(build({ phone, message }).content.text, message)
+ assert.equal(build(request("image", { url: "https://example.com/p.jpg", caption: "" })).content.caption, "")
+})
+
+test("media URLs reject normalization ambiguities, fragments, nonstandard ports and canonical expansion", () => {
+ for (const url of ["https://example.com\\p.jpg", "https://example.com/p\u0000.jpg", "https://example.com/p\u0085.jpg",
+  "https://example.com/p.jpg#download", "https://example.com/p.jpg#", "https://example.com:8443/p.jpg", "http://example.com:443/p.jpg",
+  `https://example.com/${"é".repeat(400)}.jpg`]) {
+  invalid(request("image", { url }))
+ }
+ assert.equal(build(request("image", { url: "https://example.com:443/photo.jpg" })).media.url, "https://example.com/photo.jpg")
+ assert.equal(build(request("image", { url: "http://example.com:80/photo.jpg" })).media.url, "http://example.com/photo.jpg")
+ assert.equal(build(request("image", { url: "https://example.com/p%23x.jpg" })).media.url, "https://example.com/p%23x.jpg")
+})
+
+test("media MIME metadata normalizes aliases and parameters, rejecting duplicates and unsupported formats", () => {
+ assert.equal(build(request("image", { url: "https://example.com/photo", mimetype: " IMAGE/JPG " })).content.mimetype, "image/jpeg")
+ assert.equal(build(request("voice", { url: "https://example.com/voice", mimetype: 'Audio/OGG ; codecs = "OPUS"' })).content.mimetype, "audio/ogg; codecs=opus")
+ assert.equal(build(request("document", { url: "https://example.com/doc", mimetype: 'text/plain ; charset="UTF-8"' })).content.mimetype, "text/plain; charset=utf-8")
+ for (const mimetype of ["audio/ogg; codecs=opus; CODECS=vorbis", "audio/ogg; codecs=opus; codecs=opus", "audio/ogg; codecs=vorbis", "audio/ogg; codecs=\"opus,vorbis\""]) {
+  invalid(request("voice", { url: "https://example.com/voice", mimetype }))
+ }
+ for (const [type, mimetype] of [["image", "image/gif"], ["image", "image/avif"], ["video", "video/webm"], ["audio", "audio/flac"]]) {
+  invalid(request(type, { url: "https://example.com/file", mimetype }))
+ }
+ invalid(request("document", { url: "https://example.com/doc", mimetype: "text/plain; charset=utf-8; CHARSET=ascii" }))
+})
+
+test("contact email validation rejects broken local parts and domain labels without network checks", () => {
+ for (const email of ["a..b@example.com", ".alice@example.com", "alice.@example.com", "alice@example..com", "alice@-example.com",
+  "alice@example-.com", "alice@exam_ple.com", "alice@localhost", `${"a".repeat(65)}@example.com`, `alice@${"a".repeat(64)}.com`, "alice@@example.com"]) {
+  invalid(request("contacts", { contacts: [{ name: "Alice", phone, email }] }))
+ }
+ for (const email of ["alice+team@example.co.in", "a.b@example-domain.com", "o'connor@example.com", "alice@xn--bcher-kva.example"]) {
+  const card = build(request("contacts", { contacts: [{ name: "Alice", phone, email }] })).content.contacts.contacts[0].vcard
+  assert.ok(card.includes(`EMAIL;TYPE=INTERNET:${email}`))
+ }
+})
+
+test("canonically equivalent poll choices are duplicates, and distinct choices preserve their original text", () => {
+ invalid(request("poll", { poll: { name: "Choose", options: ["Café", " Cafe\u0301 "] } }))
+ const values = [" Cafe\u0301 ", "Tea 🍵"]
+ assert.deepEqual(build(request("poll", { poll: { name: "Choose", options: values } })).content.poll.values, values)
 })

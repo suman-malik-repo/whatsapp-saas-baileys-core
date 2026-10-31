@@ -44,6 +44,14 @@ test("phone formatting rejects malformed, local-prefix and non-string values", (
  }
 })
 
+test("phone formatting rejects controls and oversized formatting before normalization", () => {
+ for (const phone of ["1202\r\n5550123", "\t12025550123", "1202\t5550123", "1202\u00855550123", "1202\u00a05550123",
+  "1202\u200b5550123", "12025550123\n", " ".repeat(54) + "12025550123"]) {
+  assert.throws(() => formatPhone(phone), TypeError)
+ }
+ assert.equal(formatPhone(" ".repeat(53) + "12025550123"), "12025550123@s.whatsapp.net")
+})
+
 test("invalid request bodies never send and return validation errors", async () => {
  let sends = 0
  const controller = loadController(() => ({ sendMessage: async () => { sends++ } }))
@@ -135,7 +143,7 @@ test("send route only permits POST and never sends for other HTTP methods", asyn
  }
  assert.equal(sends, 0)
 
- const post = await fetch(url, { method: "POST" })
+ const post = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
  assert.equal(post.status, 200)
  assert.equal(sends, 1)
 })

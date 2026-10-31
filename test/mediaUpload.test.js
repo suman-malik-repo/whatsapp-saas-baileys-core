@@ -220,3 +220,17 @@ test("invalid upload limit configuration is rejected", () => {
   assert.throws(() => createMediaUpload({ maxFileBytes }), TypeError)
  }
 })
+
+test("UTF-8 upload filenames are preserved and excessively long names are rejected", async (t) => {
+ const { base, requests } = await fixture(t)
+ const filename = "ছবি-画像.png"
+ const accepted = await post(base, [{ name: "file", filename, value: "file data" }])
+ assert.equal(accepted.status, 200)
+ const body = await accepted.json()
+ assert.equal(body.file.originalname, filename)
+ await waitFor(() => isMissing(path.dirname(body.file.path)))
+ const rejected = await post(base, [{ name: "file", filename: "x".repeat(256), value: "file data" }])
+ assert.equal(rejected.status, 400)
+ assert.equal((await rejected.json()).error, "Invalid uploaded filename")
+ assert.equal(requests.length, 1)
+})

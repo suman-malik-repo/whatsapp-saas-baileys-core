@@ -10,14 +10,20 @@ const { PassThrough } = require("node:stream")
 const test = require("node:test")
 const { prepareMediaSource, isPublicIp } = require("../services/mediaSource")
 
-const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=", "base64")
-const WEBP = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBPVP8 "), Buffer.alloc(24)])
-const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(12)])
-const OPUS = Buffer.alloc(80)
-OPUS.write("OggS", 0)
-OPUS.write("OpusHead", 28)
-const OGG = Buffer.from(OPUS)
-OGG.write("\x01vorbis", 28)
+const sample = (name) => fs.readFileSync(path.join(__dirname, "fixtures", name))
+const PNG = sample("image.png")
+const WEBP = sample("image.webp")
+const MP4 = sample("video.mp4")
+const OPUS = sample("voice.ogg")
+const OGG = sample("audio-vorbis.ogg")
+
+async function waitFor(check) {
+ const deadline = Date.now() + 5000
+ while (!check()) {
+  if (Date.now() > deadline) throw new Error("Timed out waiting for media operation")
+  await new Promise((resolve) => setImmediate(resolve))
+ }
+}
 
 async function uploaded(t, bytes) {
  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "wa-media-test-"))
@@ -99,7 +105,7 @@ test("valid WebP stickers, MP4 videos and Opus voice notes use detected media ty
   ["sticker", WEBP, "image/webp"], ["video", MP4, "video/mp4"],
   ["audio", OPUS, "audio/ogg; codecs=opus", "voice"]
  ]) {
-  const prepared = await prepareMediaSource({ kind, requestedType, file: await uploaded(t, data), maxBytes: 1000 })
+  const prepared = await prepareMediaSource({ kind, requestedType, file: await uploaded(t, data), maxBytes: 10000 })
   assert.equal(prepared.mimetype, mime)
   assert.deepEqual(await collect(prepared), data)
  }
@@ -107,7 +113,7 @@ test("valid WebP stickers, MP4 videos and Opus voice notes use detected media ty
 
 test("voice notes reject non-Opus audio and explicit MIME mismatches", async (t) => {
  await assert.rejects(prepareMediaSource({ kind: "audio", ptt: true,
-  file: await uploaded(t, OGG), maxBytes: 1000 }), { status: 415 })
+  file: await uploaded(t, OGG), maxBytes: 10000 }), { status: 415 })
  await assert.rejects(prepareMediaSource({ kind: "image", mimetype: "image/jpeg", mimetypeExplicit: true,
   file: await uploaded(t, PNG), maxBytes: 1000 }), { status: 415 })
  await assert.rejects(prepareMediaSource({ kind: "sticker",
@@ -124,6 +130,8 @@ test("documents preserve text and explicit MIME hints while recognized file type
   mimetype: "application/octet-stream", maxBytes: 1000 })
  assert.equal(png.mimetype, "image/png")
  assert.deepEqual(await collect(png), PNG)
+ await assert.rejects(prepareMediaSource({ kind: "document", file: await uploaded(t, PNG),
+  mimetype: "application/pdf", mimetypeExplicit: true, maxBytes: 1000 }), { status: 415 })
 })
 
 test("empty, oversized and unavailable uploaded files fail before sending", async (t) => {
@@ -224,11 +232,11 @@ test("cancellation aborts a pending download and cleanup can be repeated", async
  assert.ok(calls.filter((call) => call.res).every((call) => call.res.destroyed))
 })
 
-test("an oversized stream discovered after preparation still carries the 413 error", async (t) => {
+test("a valid prefix cannot bypass the size cap before media preparation completes", async (t) => {
  const calls = mockNetwork(t, [{ hang: true, initial: PNG }])
- const prepared = await prepareMediaSource({ kind: "image", url: "https://media.example/file", maxBytes: 1000 })
- const collected = collect(prepared)
- const rejected = assert.rejects(collected, { status: 413, expose: true })
+ const pending = prepareMediaSource({ kind: "image", url: "https://media.example/file", maxBytes: 1000 })
+ const rejected = assert.rejects(pending, { status: 413, expose: true })
+ await waitFor(() => calls.some((call) => call.res))
  calls.find((call) => call.res).res.write(Buffer.alloc(1500))
  await rejected
  assert.ok(calls.filter((call) => call.req).every((call) => call.req.destroyed))
@@ -258,17 +266,66 @@ test("the headers deadline also bounds DNS resolution and releases every timer",
  assert.equal(active.size, 0)
 })
 
-test("the total download deadline aborts a stalled returned stream and releases resources", async (t) => {
+test("the total download deadline aborts a stalled download before sending and releases resources", async (t) => {
  const active = fakeDeadlines(t)
  const calls = mockNetwork(t, [{ hang: true, initial: PNG }])
- const prepared = await prepareMediaSource({ kind: "image", url: "https://media.example/file", maxBytes: 1000 })
- const rejected = assert.rejects(collect(prepared), { status: 504, expose: true })
+ const pending = prepareMediaSource({ kind: "image", url: "https://media.example/file", maxBytes: 1000 })
+ const rejected = assert.rejects(pending, { status: 504, expose: true })
+ await waitFor(() => calls.some((call) => call.res) && active.size === 1)
  assert.equal(active.size, 1)
  ;[...active][0].callback()
  await rejected
  assert.equal(active.size, 0)
  assert.ok(calls.filter((call) => call.req).every((call) => call.req.destroyed))
  assert.ok(calls.filter((call) => call.res).every((call) => call.res.destroyed))
+})
+
+test("incomplete downloads and MIME codec mismatches fail before returning a sendable stream", async (t) => {
+ mockNetwork(t, [
+  { body: PNG, headers: { "content-length": String(PNG.length + 5) } },
+  { body: OPUS }
+ ])
+ await assert.rejects(prepareMediaSource({ kind: "image", url: "https://media.example/file", maxBytes: 1000 }), { status: 502 })
+ await assert.rejects(prepareMediaSource({ kind: "audio", url: "https://media.example/file", maxBytes: 1000,
+  mimetype: "audio/ogg; codecs=vorbis", mimetypeExplicit: true }), { status: 415 })
+})
+
+test("remote temporary media is removed after success, invalid contents and cancellation", async (t) => {
+ const directories = []
+ const realMkdtemp = fs.promises.mkdtemp.bind(fs.promises)
+ t.mock.method(fs.promises, "mkdtemp", async (...args) => {
+  const directory = await realMkdtemp(...args)
+  if (path.basename(directory).startsWith("baileys-media-")) directories.push(directory)
+  return directory
+ })
+ const calls = mockNetwork(t, [{ body: PNG }, { body: Buffer.from("not an image") }, { hang: true, initial: PNG }])
+ const prepared = await prepareMediaSource({ kind: "image", url: "https://media.example/file", maxBytes: 1000 })
+ assert.equal(fs.existsSync(directories[0]), true)
+ await collect(prepared)
+ assert.equal(fs.existsSync(directories[0]), false)
+ await assert.rejects(prepareMediaSource({ kind: "image", url: "https://media.example/file", maxBytes: 1000 }), { status: 415 })
+ assert.equal(fs.existsSync(directories[1]), false)
+ const controller = new AbortController()
+ const pending = prepareMediaSource({ kind: "image", url: "https://media.example/file", maxBytes: 1000 }, { signal: controller.signal })
+ const rejected = assert.rejects(pending, { status: 400 })
+ await waitFor(() => directories.length === 3)
+ controller.abort()
+ await rejected
+ assert.equal(fs.existsSync(directories[2]), false)
+ assert.ok(calls.filter((call) => call.res).every((call) => call.res.destroyed))
+})
+
+test("valid codec and Office hints work when detection only identifies a generic format", async (t) => {
+ const mp3 = await prepareMediaSource({ kind: "audio", file: await uploaded(t, sample("audio.mp3")),
+  mimetype: "audio/mpeg; codecs=mp3", mimetypeExplicit: true, maxBytes: 10000 })
+ assert.equal(mp3.mimetype, "audio/mpeg")
+ await collect(mp3)
+ const cfb = Buffer.alloc(512)
+ Buffer.from("d0cf11e0a1b11ae1", "hex").copy(cfb)
+ const office = await prepareMediaSource({ kind: "document", file: await uploaded(t, cfb),
+  mimetype: "application/msword", mimetypeExplicit: true, maxBytes: 1000 })
+ assert.equal(office.mimetype, "application/msword")
+ await collect(office)
 })
 
 test("cleanup waits for the uploaded file descriptor and is safe before consumption", async (t) => {

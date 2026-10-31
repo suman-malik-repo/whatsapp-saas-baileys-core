@@ -3,7 +3,11 @@ const fs = require("node:fs")
 const http = require("node:http")
 const https = require("node:https")
 const net = require("node:net")
-const { Transform, pipeline } = require("node:stream")
+const os = require("node:os")
+const path = require("node:path")
+const { Transform } = require("node:stream")
+const { pipeline } = require("node:stream/promises")
+const { validateMediaFile } = require("./mediaValidation")
 
 const HEADER_TIMEOUT_MS = 10_000
 const DOWNLOAD_TIMEOUT_MS = 60_000
@@ -49,13 +53,24 @@ function normalizeMime(value) {
 
 function validateMime(media, detected, prefix, responseMime) {
  const actual = detected?.mime
- const normalized = normalizeMime(actual)
+ // A generic MP4 brand does not identify its tracks. The content validator
+ // verifies audio-only MP4s before we label them as audio.
+ const normalized = media.kind === "audio" && actual === "video/mp4" ? "audio/mp4" : normalizeMime(actual)
  const hint = normalizeMime(media.mimetype)
  if (media.url && (normalizeMime(responseMime) === "text/html" ||
      /^\s*(?:\uFEFF)?\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(prefix.toString("utf8")))) {
   throw mediaError(415, "The media URL returned an HTML page instead of a file")
  }
  if (media.kind === "document") {
+  // Legacy Office documents share a container signature. Their format hint
+  // cannot be distinguished from that signature alone.
+  const legacyOffice = actual === "application/x-cfb" && [
+   "application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint"
+  ].includes(hint)
+  if (actual && media.mimetypeExplicit && hint !== "application/octet-stream" && hint !== normalizeMime(actual) && !legacyOffice) {
+   throw mediaError(415, "mimetype does not match the uploaded or downloaded file")
+  }
+  if (legacyOffice && media.mimetypeExplicit) return media.mimetype
   return actual || media.mimetype || "application/octet-stream"
  }
  const formats = {
@@ -69,11 +84,17 @@ function validateMime(media, detected, prefix, responseMime) {
  if (media.mimetypeExplicit && hint && hint !== normalized) {
   throw mediaError(415, "mimetype does not match the uploaded or downloaded file")
  }
+ const requestedCodec = /;\s*codecs=(?:"([^"]+)"|([^;\s]+))/i.exec(media.mimetype || "")
+ const actualCodec = /;\s*codecs=([^;\s]+)/i.exec(actual || "")
+ if (media.mimetypeExplicit && requestedCodec && actualCodec &&
+     (requestedCodec[1] || requestedCodec[2]).toLowerCase() !== actualCodec?.[1]?.toLowerCase()) {
+  throw mediaError(415, "mimetype codecs do not match the media file")
+ }
  if ((media.requestedType === "voice" || media.ptt === true) &&
      (normalized !== "audio/ogg" || !/codecs=opus/i.test(actual))) {
   throw mediaError(415, "Voice notes require an Ogg/Opus audio file")
  }
- return actual
+ return normalized === "audio/mp4" ? "audio/mp4" : actual
 }
 
 async function prepareMediaSource(media, { signal } = {}) {
@@ -87,13 +108,21 @@ async function prepareMediaSource(media, { signal } = {}) {
  const abortController = new AbortController()
  let closed = false
  let finalStream
- let fileClosed
+ const pendingClosures = []
+ const temporaryRoot = path.resolve(os.tmpdir())
+ let temporaryDirectory
+ let directoryPromise
  let cleanupPromise
  const track = (resource) => {
   resources.add(resource)
   // Streams can fail before Baileys attaches its consumer. The original error
   // still propagates through the pipeline and is never left unhandled.
   resource.on("error", () => {})
+  return resource
+ }
+ const trackFile = (resource) => {
+  track(resource)
+  pendingClosures.push(new Promise((resolve) => resource.once("close", resolve)))
   return resource
  }
  const cleanup = () => {
@@ -106,7 +135,16 @@ async function prepareMediaSource(media, { signal } = {}) {
   resources.clear()
   // In particular, wait for a Windows upload's file descriptor to close before
   // the multipart owner attempts to unlink its temporary file.
-  cleanupPromise = Promise.resolve(fileClosed).then(() => {})
+  cleanupPromise = (async () => {
+   await Promise.allSettled(pendingClosures)
+   if (directoryPromise) await directoryPromise
+   if (temporaryDirectory) {
+    if (path.dirname(temporaryDirectory) !== temporaryRoot || !path.basename(temporaryDirectory).startsWith("baileys-media-")) {
+     throw new Error("Invalid temporary media directory")
+    }
+    await fs.promises.rm(temporaryDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+   }
+  })()
   return cleanupPromise
  }
  const abort = (error) => {
@@ -139,6 +177,9 @@ async function prepareMediaSource(media, { signal } = {}) {
 
  async function openUrl(rawUrl, redirects = 0) {
   checkAborted()
+  if (typeof rawUrl !== "string" || rawUrl.length > 2048 || /[\s\\\u0000-\u001f\u007f-\u009f#]/u.test(rawUrl)) {
+   throw mediaError(400, "Media URL must not contain whitespace, control characters, backslashes or fragments")
+  }
   let url
   try { url = new URL(rawUrl) } catch { throw mediaError(400, "Media URL is invalid") }
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password ||
@@ -187,6 +228,7 @@ async function prepareMediaSource(media, { signal } = {}) {
    response.destroy()
    if (!location || redirects >= MAX_REDIRECTS) throw mediaError(502, "Media URL has too many or invalid redirects")
    let nextUrl
+   if (/[\s\\\u0000-\u001f\u007f-\u009f#]/u.test(location)) throw mediaError(400, "Media redirect URL is invalid")
    try { nextUrl = new URL(location, url).href } catch { throw mediaError(502, "Media URL has an invalid redirect") }
    return openUrl(nextUrl, redirects + 1)
   }
@@ -199,48 +241,78 @@ async function prepareMediaSource(media, { signal } = {}) {
    if (Number(length) > media.maxBytes) throw mediaError(413, "Media file exceeds the size limit")
    if (Number(length) === 0) throw mediaError(400, "Media file must not be empty")
   }
-  return { source: response, responseMime: response.headers["content-type"] }
+  return { source: response, responseMime: response.headers["content-type"], expectedBytes: length === undefined ? undefined : Number(length) }
  }
 
  try {
   checkAborted()
-  // Load the ESM detector before opening a flowing source, so a cold import
-  // cannot leave a stream error waiting without its detection listener.
   fileTypeModule ||= import("file-type")
-  const { fileTypeStream } = await abortable(fileTypeModule)
-  let source, responseMime
-  if (media.url) ({ source, responseMime } = await openUrl(media.url))
-  else {
+  const { fileTypeFromFile } = await abortable(fileTypeModule)
+  let filename, responseMime
+  if (media.url) {
+   const { source, responseMime: mime, expectedBytes } = await openUrl(media.url)
+   responseMime = mime
+   directoryPromise = fs.promises.mkdtemp(path.join(temporaryRoot, "baileys-media-")).then((directory) => {
+    temporaryDirectory = directory
+    return directory
+   })
+   await directoryPromise
+   checkAborted()
+   filename = path.join(temporaryDirectory, "media")
+   let bytes = 0
+   const limited = track(new Transform({
+    transform(chunk, _encoding, callback) {
+     bytes += chunk.length
+     if (bytes > media.maxBytes) return callback(mediaError(413, "Media file exceeds the size limit"))
+     callback(null, chunk)
+    },
+    flush(callback) {
+     if (!bytes) return callback(mediaError(400, "Media file must not be empty"))
+     if (expectedBytes !== undefined && expectedBytes !== bytes) return callback(mediaError(502, "Media download was incomplete"))
+     callback()
+    }
+   }))
+   const destination = trackFile(fs.createWriteStream(filename, { flags: "wx", mode: 0o600 }))
+   await pipeline(source, limited, destination, { signal: abortController.signal })
+   checkAborted()
+  } else {
    let stats
    try { stats = await abortable(fs.promises.stat(media.file.path)) }
    catch { checkAborted(); throw mediaError(400, "Uploaded media file could not be read") }
    if (!stats.isFile() || !stats.size) throw mediaError(400, "Media file must not be empty")
    if (stats.size > media.maxBytes) throw mediaError(413, "Media file exceeds the size limit")
-   source = track(fs.createReadStream(media.file.path, { highWaterMark: 64 * 1024 }))
-   fileClosed = new Promise((resolve) => source.once("close", resolve))
+   filename = media.file.path
   }
-  let bytes = 0
-  let prefix = Buffer.alloc(0)
-  const limited = track(new Transform({
-   transform(chunk, _encoding, callback) {
-    bytes += chunk.length
-    if (bytes > media.maxBytes) return callback(mediaError(413, "Media file exceeds the size limit"))
-    if (prefix.length < 512) prefix = Buffer.concat([prefix, chunk.subarray(0, 512 - prefix.length)])
-    callback(null, chunk)
-   },
-   flush(callback) { callback(bytes ? null : mediaError(400, "Media file must not be empty")) }
-  }))
-  if (source.errored) throw source.errored
-  pipeline(source, limited, () => {})
-  finalStream = track(await fileTypeStream(limited, { signal: abortController.signal, sampleSize: 4100 }))
+  const inspecting = (async () => {
+   let detected
+   try { detected = await fileTypeFromFile(filename) }
+   catch { throw mediaError(415, "Media file is truncated or malformed") }
+   const handle = await fs.promises.open(filename, "r")
+   let prefix
+   try {
+    const buffer = Buffer.alloc(512)
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+    prefix = buffer.subarray(0, bytesRead)
+   } finally { await handle.close() }
+   const mimetype = validateMime(media, detected, prefix, responseMime)
+   const metadata = await validateMediaFile(filename, media, mimetype, { signal: abortController.signal })
+   return { mimetype, metadata }
+  })()
+  // Let parsers close their file handles before deleting owned files even
+  // when the HTTP client disconnects during inspection.
+  pendingClosures.push(inspecting)
+  const { mimetype, metadata } = await abortable(inspecting)
   checkAborted()
-  const mimetype = validateMime(media, finalStream.fileType, prefix, responseMime)
-  finalStream.once("end", () => { void cleanup() })
-  finalStream.once("close", () => { void cleanup() })
-  return { stream: finalStream, mimetype, cleanup }
+  for (const timer of timers) clearTimeout(timer)
+  timers.clear()
+  finalStream = trackFile(fs.createReadStream(filename, { highWaterMark: 64 * 1024 }))
+  const cleanupInBackground = () => { cleanup().catch(() => console.error("Temporary media cleanup failed")) }
+  finalStream.once("end", cleanupInBackground)
+  finalStream.once("close", cleanupInBackground)
+  return { stream: finalStream, mimetype, metadata, cleanup }
  } catch (error) {
   const reason = abortController.signal.aborted ? abortController.signal.reason : error
-  await cleanup()
+  try { await cleanup() } catch { console.error("Temporary media cleanup failed") }
   if (reason?.expose && Number.isInteger(reason.status)) throw reason
   throw mediaError(502, "Unable to read the media file")
  }

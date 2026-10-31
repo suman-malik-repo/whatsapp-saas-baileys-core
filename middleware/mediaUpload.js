@@ -36,14 +36,14 @@ function createMediaUpload({ maxFileBytes = MAX_FILE_BYTES } = {}) {
   try {
    parser = Busboy({
     headers: req.headers,
+    defParamCharset: "utf8",
     limits: {
      fileSize: maxFileBytes + 1,
      files: 1,
      fields: MAX_FIELDS,
      fieldSize: MAX_FIELD_BYTES,
      fieldNameSize: 100,
-     parts: MAX_FIELDS + 1,
-     headerPairs: 100
+     parts: MAX_FIELDS + 1
     }
    })
   } catch {
@@ -99,6 +99,7 @@ function createMediaUpload({ maxFileBytes = MAX_FILE_BYTES } = {}) {
 
   function cleanupInBackground() {
    cleanup().catch((error) => {
+    req.uploadCleanupFailed = true
     console.error("Temporary upload cleanup failed:", error.code || "unknown error")
    })
   }
@@ -165,9 +166,15 @@ function createMediaUpload({ maxFileBytes = MAX_FILE_BYTES } = {}) {
       return fail(uploadError(400, "Only one file can be uploaded"))
      }
 
+     const originalname = path.basename(info.filename || "upload")
+     if (originalname.length > 255 || !originalname.isWellFormed() || /[\u0000-\u001f\u007f-\u009f]/u.test(originalname)) {
+      stream.resume()
+      return fail(uploadError(400, "Invalid uploaded filename"))
+     }
+
      const file = {
       path: path.join(temporaryDirectory, "media"),
-      originalname: path.basename(info.filename || "upload"),
+      originalname,
       mimetype: info.mimeType,
       size: 0
      }
@@ -209,7 +216,7 @@ function createMediaUpload({ maxFileBytes = MAX_FILE_BYTES } = {}) {
    return next()
   } catch (error) {
    fail(error)
-   await cleanup()
+   try { await cleanup() } catch { req.uploadCleanupFailed = true; console.error("Temporary upload cleanup failed") }
    req.removeListener("aborted", onAborted)
    if (!clientAborted && !req.aborted && !res.destroyed) return next(error)
   }

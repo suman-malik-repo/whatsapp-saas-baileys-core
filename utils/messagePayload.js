@@ -19,6 +19,16 @@ const DEFAULT_MIMES = {
  image: "image/jpeg", video: "video/mp4", audio: "audio/mpeg",
  voice: "audio/ogg; codecs=opus", document: "application/octet-stream", sticker: "image/webp"
 }
+const SUPPORTED_MIMES = {
+ image: ["image/jpeg", "image/png", "image/webp"],
+ video: ["video/mp4"],
+ audio: ["audio/mpeg", "audio/ogg", "audio/mp4", "audio/aac", "audio/wav"],
+ voice: ["audio/ogg"], sticker: ["image/webp"]
+}
+const MIME_ALIASES = {
+ "image/jpg": "image/jpeg", "audio/mp3": "audio/mpeg", "audio/x-wav": "audio/wav",
+ "audio/wave": "audio/wav", "audio/x-m4a": "audio/mp4", "audio/opus": "audio/ogg"
+}
 const EXTENSION_MIMES = {
  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
  ".webp": "image/webp", ".gif": "image/gif", ".avif": "image/avif",
@@ -55,9 +65,11 @@ function fields(value, allowed, label) {
 
 function string(value, label, max, { allowEmpty = false, controls = true } = {}) {
  if (typeof value !== "string") invalid(`${label} must be a string`)
- if (!allowEmpty && !value.trim()) invalid(`${label} must not be empty`)
+ if (!value.isWellFormed()) invalid(`${label} must contain valid Unicode`)
+ if (!allowEmpty && !/[^\p{White_Space}\p{Default_Ignorable_Code_Point}]/u.test(value)) invalid(`${label} must not be empty or invisible`)
  if (value.length > max) invalid(`${label} must be at most ${max} characters`)
- if (!controls && /[\u0000-\u001f\u007f]/.test(value)) invalid(`${label} must not contain control characters`)
+ const forbiddenControls = controls ? /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u : /[\u0000-\u001f\u007f-\u009f]/u
+ if (forbiddenControls.test(value)) invalid(`${label} must not contain control characters`)
  return value
 }
 
@@ -67,8 +79,7 @@ function boolean(value, label, multipart) {
  return value
 }
 
-function number(value, label, min, max, multipart = false) {
- if (multipart && typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value)) value = Number(value)
+function number(value, label, min, max) {
  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
   invalid(`${label} must be a finite number between ${min} and ${max}`)
  }
@@ -84,11 +95,14 @@ function normalizedPhone(phone, label = "phone") {
 }
 
 function mediaUrl(value) {
- string(value, "url", 2048)
- if (!/^https?:\/\//i.test(value) || /\s/.test(value)) invalid("url must be an absolute HTTP or HTTPS URL without whitespace")
+ string(value, "url", 2048, { controls: false })
+ if (!/^https?:\/\//i.test(value) || /[\s\\]/u.test(value)) invalid("url must be an absolute HTTP or HTTPS URL without whitespace or backslashes")
  let url
  try { url = new URL(value) } catch { invalid("url must be a valid HTTP or HTTPS URL") }
  if (!url.hostname || url.username || url.password) invalid("url must have a hostname and must not contain credentials")
+ if (value.includes("#")) invalid("url must not contain a fragment")
+ if (url.port && url.port !== (url.protocol === "http:" ? "80" : "443")) invalid("url must use the standard HTTP or HTTPS port")
+ if (url.href.length > 2048) invalid("url must be at most 2048 characters after normalization")
  return url
 }
 
@@ -105,19 +119,28 @@ function filename(value, label) {
 
 function mime(value, type, ptt) {
  string(value, "mimetype", 200, { controls: false })
- const normalized = value.toLowerCase().trim()
- if (!/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+(?:\s*;\s*[a-z0-9_-]+=(?:[a-z0-9_.+-]+|"[a-z0-9_.+-]+"))*$/.test(normalized)) {
+ const [rawBase, ...rawParameters] = value.toLowerCase().trim().split(";")
+ const base = MIME_ALIASES[rawBase.trim()] || rawBase.trim()
+ if (!/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(base)) {
   invalid("mimetype must be a valid MIME type")
  }
- const base = normalized.split(";", 1)[0]
+ const parameters = new Map()
+ for (const parameter of rawParameters) {
+  const match = /^\s*([a-z0-9_-]+)\s*=\s*([a-z0-9_.+-]+|"[a-z0-9_.+-]+")\s*$/.exec(parameter)
+  if (!match) invalid("mimetype must be a valid MIME type")
+  const [, key, rawValue] = match
+  if (parameters.has(key)) invalid(`mimetype must not repeat the ${key} parameter`)
+  parameters.set(key, rawValue.replace(/^"|"$/g, ""))
+ }
  const family = { image: "image/", video: "video/", audio: "audio/", voice: "audio/" }[type]
  if (family && !base.startsWith(family)) invalid(`mimetype is not compatible with ${type}`)
  if (type === "sticker" && base !== "image/webp") invalid("Stickers must use image/webp")
- if ((type === "voice" || ptt) && (!/^audio\/(ogg|opus)$/.test(base) ||
-     /;\s*codecs=/.test(normalized) && !/;\s*codecs=(?:opus|"opus")(?:;|$)/.test(normalized))) {
+ if ((type === "voice" || ptt) && (base !== "audio/ogg" ||
+     parameters.has("codecs") && parameters.get("codecs") !== "opus")) {
   invalid("Voice notes require Ogg/Opus audio; automatic transcoding is not provided")
  }
- return normalized
+ if (SUPPORTED_MIMES[type] && !SUPPORTED_MIMES[type].includes(base)) invalid(`Unsupported ${type} MIME type`)
+ return base + [...parameters].map(([key, parameter]) => `; ${key}=${parameter}`).join("")
 }
 
 function buildMedia(body, type, file) {
@@ -138,7 +161,11 @@ function buildMedia(body, type, file) {
   if (Object.hasOwn(body, key)) content[key] = boolean(body[key], key, multipart)
  }
  if (type === "voice") content.ptt = true
- if (Object.hasOwn(body, "seconds")) content.seconds = number(body.seconds, "seconds", 0, 86400, multipart)
+ if (Object.hasOwn(body, "seconds")) {
+  const seconds = multipart && typeof body.seconds === "string" && /^\d+$/.test(body.seconds) ? Number(body.seconds) : body.seconds
+  if (!Number.isInteger(seconds) || seconds < 0 || seconds > 86400) invalid("seconds must be an integer between 0 and 86400")
+  content.seconds = seconds
+ }
 
  const sourceName = file ? path.win32.basename(file.originalname || "") : urlFilename(url)
  const inferredMime = EXTENSION_MIMES[path.extname(sourceName).toLowerCase()]
@@ -156,6 +183,7 @@ function buildMedia(body, type, file) {
    mimetypeExplicit: Object.hasOwn(body, "mimetype"),
    mimetype: content.mimetype,
    ptt: content.ptt === true,
+   ...(Object.hasOwn(content, "isAnimated") ? { isAnimated: content.isAnimated } : {}),
    ...(url ? { url: url.href } : { file }),
    maxBytes: MEDIA_LIMITS[type]
   }
@@ -198,7 +226,14 @@ function buildContacts(body) {
   }
   if (Object.hasOwn(contact, "email")) {
    const email = string(contact.email, `${label}.email`, 254, { controls: false })
-   if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email)) invalid(`${label}.email must be a valid email address`)
+   const parts = email.split("@")
+   const local = parts[0]
+   const domain = parts[1]
+   if (parts.length !== 2 || local.length > 64 || !/^[a-z0-9!#$%&'*+/=?^_`{|}~.-]+$/i.test(local) ||
+       local.startsWith(".") || local.endsWith(".") || local.includes("..") || !domain || domain.length > 253 ||
+       !domain.includes(".") || !domain.split(".").every((part) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(part))) {
+    invalid(`${label}.email must be a valid email address`)
+   }
    lines.push(`EMAIL;TYPE=INTERNET:${escapeVcard(email)}`)
   }
   lines.push("END:VCARD")
@@ -219,7 +254,7 @@ function buildPoll(body) {
   invalid("poll.options must contain between 2 and 12 strings")
  }
  const values = body.poll.options.map((value, index) => string(value, `poll.options[${index}]`, 100, { controls: false }))
- if (new Set(values.map((value) => value.trim().toLowerCase())).size !== values.length) invalid("poll.options must be unique")
+ if (new Set(values.map((value) => value.normalize("NFC").trim().toLowerCase())).size !== values.length) invalid("poll.options must be unique")
  const selectableCount = Object.hasOwn(body.poll, "selectableCount") ? body.poll.selectableCount : 1
  if (!Number.isInteger(selectableCount) || selectableCount < 1 || selectableCount > values.length) {
   invalid("poll.selectableCount must be an integer between 1 and the number of options")

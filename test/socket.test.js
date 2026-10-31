@@ -36,6 +36,7 @@ function loadSocket(options = {}) {
  const qrCodes = []
  const archivedPaths = []
  const createdDirectories = []
+ const errors = []
  let timerId = 0
  let now = Date.parse("2026-01-01T00:00:00.000Z")
  let authCalls = 0
@@ -45,6 +46,7 @@ function loadSocket(options = {}) {
 
  const fakeBaileys = {
   DisconnectReason: reasons,
+  proto: { WebMessageInfo: { Status: { ERROR: 0, PENDING: 1, SERVER_ACK: 2, DELIVERY_ACK: 3, READ: 4, PLAYED: 5 } } },
   useMultiFileAuthState: async (authPath) => {
    authPaths.push(authPath)
    authCalls += 1
@@ -95,7 +97,7 @@ function loadSocket(options = {}) {
    if (name === "pino") return () => ({})
    throw new Error(`Unexpected dependency: ${name}`)
   },
-  console: { log() {}, error() {} },
+  console: { log() {}, error(...args) { errors.push(args) } },
   Date: class extends Date {
    static now() { return now }
   },
@@ -117,6 +119,7 @@ function loadSocket(options = {}) {
   qrCodes,
   archivedPaths,
   createdDirectories,
+  errors,
   get authCalls() { return authCalls },
   get saveCalls() { return saveCalls },
   advanceTime(ms) { now += ms },
@@ -911,4 +914,248 @@ test("starting during active auth archival joins the automatically started repla
  manager.sockets[1].ev.emit("connection.update", { qr: "archived-and-started" })
  assert.equal((await pairing).qr, "archived-and-started")
  assert.equal(manager.timers.size, 0)
+})
+
+test("connection subscribers receive an initial sanitized snapshot and meaningful transitions", async () => {
+ const manager = loadSocket()
+ const snapshots = []
+ const unsubscribe = manager.subscribeConnection((snapshot) => snapshots.push(snapshot))
+ assert.deepEqual(Object.keys(snapshots[0]).sort(), ["connected", "lastDisconnectCode", "nextRetryAt", "reconnectAttempts", "state"])
+ await manager.startWhatsApp()
+ const first = manager.sockets[0]
+ first.ev.emit("connection.update", { qr: "private-qr-text", secret: "must-not-be-published" })
+ first.ev.emit("connection.update", { connection: "open" })
+ close(first, reasons.connectionLost)
+ assert.equal(snapshots.at(-1).connected, false)
+ assert.equal(snapshots.at(-1).nextRetryAt, "2026-01-01T00:00:01.000Z")
+ await manager.runTimer(1000)
+ manager.sockets[1].ev.emit("connection.update", { connection: "open" })
+ close(manager.sockets[1], reasons.loggedOut)
+ await manager.stopWhatsApp()
+ assert.deepEqual(snapshots.map(({ state }) => state), ["stopped", "connecting", "qr_required", "connected", "reconnecting", "connecting", "connected", "logged_out", "stopped"])
+ assert.equal(JSON.stringify(snapshots).includes("private-qr-text"), false)
+ assert.equal(JSON.stringify(snapshots).includes("must-not-be-published"), false)
+ const count = snapshots.length
+ unsubscribe()
+ unsubscribe()
+ await manager.startWhatsApp()
+ assert.equal(snapshots.length, count)
+ await manager.stopWhatsApp()
+})
+
+test("connection subscribers observe credential persistence failures and QR maintenance failures", async () => {
+ const credentialManager = loadSocket({ saveCreds() { throw new Error("secret filesystem details") } })
+ const credentialStates = []
+ credentialManager.subscribeConnection(({ state }) => credentialStates.push(state))
+ await credentialManager.startWhatsApp()
+ credentialManager.sockets[0].ev.emit("connection.update", { connection: "open" })
+ credentialManager.sockets[0].ev.emit("creds.update", {})
+ await settle()
+ assert.deepEqual(credentialStates, ["stopped", "connecting", "connected", "failed"])
+
+ const maintenanceManager = loadSocket({ rename() { throw new Error("private path") } })
+ const maintenanceStates = []
+ maintenanceManager.subscribeConnection(({ state }) => maintenanceStates.push(state))
+ await maintenanceManager.startWhatsApp()
+ close(maintenanceManager.sockets[0], reasons.loggedOut)
+ const request = maintenanceManager.requestQr()
+ await settle()
+ assert.equal((await request).state, "failed")
+ assert.deepEqual(maintenanceStates, ["stopped", "connecting", "logged_out", "connecting", "failed"])
+})
+
+test("subscribers cannot mutate other snapshots and throwing or rejecting listeners are isolated", async () => {
+ const manager = loadSocket()
+ const snapshots = []
+ manager.subscribeConnection((snapshot) => { snapshot.state = "corrupted" })
+ manager.subscribeConnection(() => { throw new Error("API_KEY=private-secret") })
+ manager.subscribeConnection(async () => { throw new Error("private authentication data") })
+ const unsubscribe = manager.subscribeConnection((snapshot) => snapshots.push(snapshot))
+ await manager.startWhatsApp()
+ manager.sockets[0].ev.emit("connection.update", { connection: "open" })
+ await settle()
+ assert.deepEqual(snapshots.map(({ state }) => state), ["stopped", "connecting", "connected"])
+ assert.equal(manager.getConnectionStatus().state, "connected")
+ assert.ok(manager.errors.length >= 6)
+ assert.equal(manager.errors.every(([message]) => message === "WhatsApp status subscriber failed"), true)
+ unsubscribe()
+ assert.throws(() => manager.subscribeConnection(null), /must be a function/)
+ assert.throws(() => manager.subscribeMessageUpdates({}), /must be a function/)
+ await manager.stopWhatsApp()
+ await settle()
+})
+
+test("message update subscribers receive only outbound delivery and read acknowledgements", async () => {
+ const manager = loadSocket()
+ const updates = []
+ manager.subscribeMessageUpdates((update) => updates.push(update))
+ await manager.startWhatsApp()
+ const socket = manager.sockets[0]
+ socket.ev.emit("connection.update", { connection: "open" })
+ for (const status of [0, 1, 2, 3, 4, 5, 6, "3", null]) {
+  socket.ev.emit("messages.update", [{
+   key: { fromMe: true, id: "TEST-MESSAGE-1", remoteJid: "12025550123@s.whatsapp.net", participant: "private" },
+   update: { status, message: { conversation: "private message" } }
+  }])
+ }
+ socket.ev.emit("messages.update", [{ key: { fromMe: false, id: "INCOMING" }, update: { status: 4 } }])
+ socket.ev.emit("messages.update", [{ key: { id: "UNKNOWN-ORIGIN" }, update: { status: 3 } }])
+ assert.deepEqual(updates.map(({ status }) => status), ["delivered", "read", "read"])
+ assert.equal(updates.every((update) => Object.keys(update).sort().join(",") === "messageId,remoteJid,status"), true)
+ assert.equal(updates.every(({ messageId }) => messageId === "TEST-MESSAGE-1"), true)
+ assert.equal(JSON.stringify(updates).includes("private"), false)
+ await manager.stopWhatsApp()
+})
+
+test("receipt timestamps map to sanitized delivered and read states including protobuf Long timestamps", async () => {
+ const manager = loadSocket()
+ const updates = []
+ manager.subscribeMessageUpdates((update) => updates.push(update))
+ await manager.startWhatsApp()
+ const socket = manager.sockets[0]
+ const key = { fromMe: true, id: "RECEIPT-1", remoteJid: "12025550123@s.whatsapp.net" }
+ const emit = (receipt) => socket.ev.emit("message-receipt.update", [{ key, receipt }])
+ emit({ receiptTimestamp: 123, userJid: "private participant" })
+ emit({ receiptTimestamp: 123, readTimestamp: 124 })
+ emit({ playedTimestamp: 125 })
+ emit({ receiptTimestamp: { toNumber: () => 126 } })
+ emit({ readTimestamp: { toNumber: () => 127 } })
+ emit({ receiptTimestamp: -1 })
+ emit({ readTimestamp: 0 })
+ emit({ receiptTimestamp: NaN })
+ emit({ receiptTimestamp: Infinity })
+ emit({ receiptTimestamp: "128" })
+ emit({ readTimestamp: { toNumber() { throw new Error("bad Long") } } })
+ socket.ev.emit("message-receipt.update", [{ key: { ...key, fromMe: false }, receipt: { readTimestamp: 129 } }])
+ assert.deepEqual(updates.map(({ status }) => status), ["delivered", "read", "read", "delivered", "read"])
+ assert.equal(JSON.stringify(updates).includes("private participant"), false)
+ await manager.stopWhatsApp()
+})
+
+test("malformed acknowledgement batches and message identifiers are ignored safely", async () => {
+ const manager = loadSocket()
+ const updates = []
+ manager.subscribeMessageUpdates((update) => updates.push(update))
+ await manager.startWhatsApp()
+ const socket = manager.sockets[0]
+ for (const event of ["messages.update", "message-receipt.update"]) {
+  for (const batch of [undefined, null, {}, "not-an-array", [null, {}, { update: {} }]]) {
+   assert.doesNotThrow(() => socket.ev.emit(event, batch))
+  }
+ }
+ for (const id of [undefined, null, "", "private\nlog injection", "has a space", "a".repeat(257), 123]) {
+  socket.ev.emit("messages.update", [{ key: { fromMe: true, id }, update: { status: 4 } }])
+ }
+ socket.ev.emit("messages.update", [{ key: { fromMe: true, id: "SAFE", remoteJid: "private\ninvalid" }, update: { status: 3 } }])
+ assert.equal(updates.length, 1)
+ assert.deepEqual(Object.keys(updates[0]).sort(), ["messageId", "status"])
+ await manager.stopWhatsApp()
+})
+
+test("duplicate and out-of-order acknowledgements are forwarded for queue monotonic handling", async () => {
+ const manager = loadSocket()
+ const updates = []
+ manager.subscribeMessageUpdates((update) => updates.push(update))
+ await manager.startWhatsApp()
+ const socket = manager.sockets[0]
+ const key = { fromMe: true, id: "OUT-OF-ORDER" }
+ for (const status of [4, 3, 3, 4]) socket.ev.emit("messages.update", [{ key, update: { status } }])
+ assert.deepEqual(updates.map(({ status }) => status), ["read", "delivered", "delivered", "read"])
+ await manager.stopWhatsApp()
+})
+
+test("message subscribers unsubscribe and isolate callback failures", async () => {
+ const manager = loadSocket()
+ const updates = []
+ manager.subscribeMessageUpdates((update) => { update.status = "corrupted" })
+ manager.subscribeMessageUpdates(() => { throw new Error("private message details") })
+ manager.subscribeMessageUpdates(async () => { throw new Error("private error details") })
+ const unsubscribe = manager.subscribeMessageUpdates((update) => updates.push(update))
+ await manager.startWhatsApp()
+ const socket = manager.sockets[0]
+ const acknowledgement = [{ key: { fromMe: true, id: "ACK" }, update: { status: 3 } }]
+ assert.doesNotThrow(() => socket.ev.emit("messages.update", acknowledgement))
+ await settle()
+ assert.equal(updates[0].status, "delivered")
+ assert.equal(manager.errors.every(([message]) => message === "WhatsApp status subscriber failed"), true)
+ unsubscribe()
+ unsubscribe()
+ socket.ev.emit("messages.update", acknowledgement)
+ await settle()
+ assert.equal(updates.length, 1)
+ await manager.stopWhatsApp()
+})
+
+test("acknowledgement listeners are detached and stale socket events cannot reach subscribers", async () => {
+ const manager = loadSocket()
+ const updates = []
+ manager.subscribeMessageUpdates((update) => updates.push(update))
+ await manager.startWhatsApp()
+ const oldSocket = manager.sockets[0]
+ const staleHandler = oldSocket.ev.listeners("messages.update")[0]
+ const staleReceiptHandler = oldSocket.ev.listeners("message-receipt.update")[0]
+ assert.equal(oldSocket.ev.listenerCount("messages.update"), 1)
+ assert.equal(oldSocket.ev.listenerCount("message-receipt.update"), 1)
+ close(oldSocket, reasons.connectionLost)
+ assert.equal(oldSocket.ev.listenerCount("messages.update"), 0)
+ assert.equal(oldSocket.ev.listenerCount("message-receipt.update"), 0)
+ await manager.runTimer(1000)
+ const key = { fromMe: true, id: "LATE" }
+ staleHandler([{ key, update: { status: 4 } }])
+ staleReceiptHandler([{ key, receipt: { receiptTimestamp: 123 } }])
+ oldSocket.ev.emit("messages.update", [{ key, update: { status: 4 } }])
+ assert.equal(updates.length, 0)
+ const currentSocket = manager.sockets[1]
+ currentSocket.ev.emit("messages.update", [{ key, update: { status: 3 } }])
+ assert.equal(updates.length, 1)
+ const stoppedHandler = currentSocket.ev.listeners("messages.update")[0]
+ await manager.stopWhatsApp()
+ assert.equal(currentSocket.ev.listenerCount("messages.update"), 0)
+ assert.equal(currentSocket.ev.listenerCount("message-receipt.update"), 0)
+ stoppedHandler([{ key, update: { status: 4 } }])
+ assert.equal(updates.length, 1)
+ assert.equal(manager.timers.size, 0)
+})
+
+test("acknowledgement batches stop forwarding when a subscriber shuts down the connection", async () => {
+ const manager = loadSocket()
+ const updates = []
+ manager.subscribeMessageUpdates((update) => {
+  updates.push(update)
+  void manager.stopWhatsApp()
+ })
+ await manager.startWhatsApp()
+ const socket = manager.sockets[0]
+ socket.ev.emit("messages.update", [
+  { key: { fromMe: true, id: "FIRST" }, update: { status: 3 } },
+  { key: { fromMe: true, id: "STALE-IN-BATCH" }, update: { status: 4 } }
+ ])
+ assert.deepEqual(updates.map(({ messageId }) => messageId), ["FIRST"])
+ assert.equal(socket.ev.listenerCount("messages.update"), 0)
+ assert.equal(socket.ev.listenerCount("message-receipt.update"), 0)
+ assert.equal(manager.getConnectionStatus().state, "stopped")
+})
+
+test("QR transport replacement and credential failures remove acknowledgement listeners", async () => {
+ const manager = loadSocket()
+ await manager.startWhatsApp()
+ const oldSocket = manager.sockets[0]
+ oldSocket.ev.emit("connection.update", { qr: "old-private-code" })
+ const request = manager.requestQr()
+ await settle()
+ assert.equal(oldSocket.ev.listenerCount("messages.update"), 0)
+ assert.equal(oldSocket.ev.listenerCount("message-receipt.update"), 0)
+ assert.equal(manager.sockets[1].ev.listenerCount("messages.update"), 1)
+ manager.sockets[1].ev.emit("connection.update", { qr: "new-private-code" })
+ await request
+ await manager.stopWhatsApp()
+
+ const failingManager = loadSocket({ saveCreds() { throw new Error("secret storage error") } })
+ await failingManager.startWhatsApp()
+ const failingSocket = failingManager.sockets[0]
+ failingSocket.ev.emit("creds.update", {})
+ await settle()
+ assert.equal(failingSocket.ev.listenerCount("messages.update"), 0)
+ assert.equal(failingSocket.ev.listenerCount("message-receipt.update"), 0)
+ assert.equal(failingManager.getConnectionStatus().state, "failed")
 })

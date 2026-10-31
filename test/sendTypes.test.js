@@ -12,12 +12,11 @@ const { buildMessagePayload } = require("../utils/messagePayload")
 
 const API_KEY = "offline-send-integration-key"
 const PHONE = "+1 (202) 555-0123"
-const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=", "base64")
-const WEBP = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBPVP8 "), Buffer.alloc(24)])
-const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(12)])
-const OPUS = Buffer.alloc(80)
-OPUS.write("OggS", 0)
-OPUS.write("OpusHead", 28)
+const sample = (name) => fs.readFileSync(path.join(__dirname, "fixtures", name))
+const PNG = sample("image.png")
+const WEBP = sample("image.webp")
+const MP4 = sample("video.mp4")
+const OPUS = sample("voice.ogg")
 
 async function fixture(t, options = {}) {
  const calls = []
@@ -155,10 +154,54 @@ test("authentication and validation prevent media preparation and sends", async 
  assert.equal(f.uploads.length, 0)
  for (const body of [
   { ...image, phone: "invalid" }, { ...image, url: "file:///tmp/photo.png" },
-  { ...image, fileName: "irrelevant.png" }, { phone: PHONE, type: "poll", poll: { name: "Choose", options: ["same", "SAME"] } }
+  { ...image, fileName: "irrelevant.png" }, { phone: PHONE, type: "poll", poll: { name: "Choose", options: ["same", "SAME"] } },
+  { phone: "1202\r\n5550123", message: "hello" }, { phone: PHONE, message: "bad\u0000text" },
+  { phone: PHONE, type: "audio", url: "https://example.com/audio.mp3", seconds: 1.5 }
  ]) assert.equal((await f.json(body)).status, 400)
  assert.equal(preparations, 0)
  assert.equal(f.calls.length, 0)
+})
+
+test("unsupported request Content-Types return 415 without preparing or sending", async (t) => {
+ const f = await fixture(t)
+ for (const contentType of ["text/plain", "application/x-www-form-urlencoded", "application/octet-stream"]) {
+  const response = await fetch(f.url, { method: "POST", headers: { "x-api-key": API_KEY, "Content-Type": contentType }, body: "phone=12025550123" })
+  assert.equal(response.status, 415)
+  assert.equal((await response.json()).success, false)
+ }
+ assert.equal(f.calls.length, 0)
+})
+
+test("spoofed media signatures cannot reach WhatsApp and their uploads are removed", async (t) => {
+ const f = await fixture(t)
+ const fakeOpus = Buffer.alloc(80)
+ fakeOpus.write("OggS", 0)
+ fakeOpus.write("OpusHead", 28)
+ for (const [type, bytes, filename] of [
+  ["image", Buffer.from("ffd8ffff", "hex"), "fake.jpg"],
+  ["image", PNG.subarray(0, 30), "truncated.png"],
+  ["video", Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(12)]), "fake.mp4"],
+  ["voice", fakeOpus, "fake.opus"],
+  ["sticker", Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBPVP8 "), Buffer.alloc(24)]), "fake.webp"]
+ ]) {
+  const response = await f.upload(type, bytes, filename)
+  assert.equal(response.status, 415, `${type}: ${JSON.stringify(await response.json())}`)
+  assert.equal(fs.existsSync(path.dirname(f.uploads.at(-1))), false)
+ }
+ assert.equal(f.calls.length, 0)
+})
+
+test("actual sticker animation and audio duration are inferred when optional fields are absent", async (t) => {
+ const f = await fixture(t)
+ const sticker = await f.upload("sticker", sample("animated.webp"), "animated.webp")
+ assert.equal(sticker.status, 200)
+ assert.equal(f.calls.at(-1).content.isAnimated, true)
+ const voice = await f.upload("voice", OPUS, "voice.opus")
+ assert.equal(voice.status, 200)
+ assert.equal(f.calls.at(-1).content.seconds, 1)
+ const wrongAnimation = await f.upload("sticker", WEBP, "static.webp", "image/webp", { isAnimated: "true" })
+ assert.equal(wrongAnimation.status, 415)
+ assert.equal(f.calls.length, 2)
 })
 
 test("disconnected requests avoid remote media retrieval", async (t) => {
@@ -273,8 +316,13 @@ test("installed Baileys serializes locations, contact cards and both poll modes 
 
 test("Postman JSON examples match the implemented request schema", () => {
  const collection = require("../postman/Baileys-WhatsApp.postman_collection.json")
- assert.equal(collection.item.length, 11)
+ assert.equal(collection.item.length, 16)
  for (const item of collection.item) {
+  if (item.request.method === "GET") {
+   assert.ok(item.request.url.startsWith("{{baseUrl}}/"))
+   if (item.request.url.includes("/api/")) assert.ok(item.request.header.some(({ key }) => key === "x-api-key"))
+   continue
+  }
   assert.equal(item.request.method, "POST")
   assert.equal(item.request.url, "{{baseUrl}}/api/send")
   assert.ok(item.request.header.some(({ key, value }) => key === "x-api-key" && value === "{{apiKey}}"))

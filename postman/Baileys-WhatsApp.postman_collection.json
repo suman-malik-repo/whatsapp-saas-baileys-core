@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Baileys WhatsApp message API",
-    "description": "Send messages by phone number. Set baseUrl, apiKey and phone before sending. Replace example.com media URLs with direct public file URLs. The upload example requires selecting a local file. All sends are POST and use x-api-key authentication.",
+    "description": "Send messages by phone number. Set baseUrl, apiKey and phone before sending. Replace example.com media URLs with direct public file URLs. The upload example requires selecting a local file. All sends are POST and use x-api-key authentication. Sends now return 202 Accepted with a local jobId. The response script saves jobId for Get message status. A 202 is not confirmed delivery. Use wait=true or QUEUE_API_MODE=wait only for bounded migration compatibility; always poll the same accepted job.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -18,6 +18,11 @@
     {
       "key": "phone",
       "value": "12025550123",
+      "type": "string"
+    },
+    {
+      "key": "jobId",
+      "value": "JOB_ID_FROM_SEND",
       "type": "string"
     }
   ],
@@ -49,7 +54,20 @@
           }
         },
         "url": "{{baseUrl}}/api/send"
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body;",
+              "try { body = pm.response.json(); } catch (_) {}",
+              "if (body && body.jobId) pm.collectionVariables.set('jobId', body.jobId);"
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "Image URL",
@@ -78,7 +96,20 @@
           }
         },
         "url": "{{baseUrl}}/api/send"
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body;",
+              "try { body = pm.response.json(); } catch (_) {}",
+              "if (body && body.jobId) pm.collectionVariables.set('jobId', body.jobId);"
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "Video URL",
@@ -107,12 +138,25 @@
           }
         },
         "url": "{{baseUrl}}/api/send"
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body;",
+              "try { body = pm.response.json(); } catch (_) {}",
+              "if (body && body.jobId) pm.collectionVariables.set('jobId', body.jobId);"
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "Audio URL",
       "request": {
-        "description": "Send audio from a public direct file URL. Required: phone, type=audio, url. Optional: mimetype, ptt, seconds (number from 0 through 86400), viewOnce. ptt=true requires actual Ogg/Opus content. Captions are not accepted for audio. Maximum file size: 16 MiB. Replace the placeholder URL.",
+        "description": "Send audio from a public direct file URL. Required: phone, type=audio, url. Optional: mimetype, ptt, seconds (integer from 0 through 86400), viewOnce. Duration is detected when omitted. ptt=true requires actual Ogg/Opus content. Captions are not accepted for audio. Maximum file size: 16 MiB. Replace the placeholder URL.",
         "method": "POST",
         "header": [
           {
@@ -136,7 +180,20 @@
           }
         },
         "url": "{{baseUrl}}/api/send"
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body;",
+              "try { body = pm.response.json(); } catch (_) {}",
+              "if (body && body.jobId) pm.collectionVariables.set('jobId', body.jobId);"
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "Voice note URL",
@@ -165,7 +222,20 @@
           }
         },
         "url": "{{baseUrl}}/api/send"
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body;",
+              "try { body = pm.response.json(); } catch (_) {}",
+              "if (body && body.jobId) pm.collectionVariables.set('jobId', body.jobId);"
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "Document URL",
@@ -194,12 +264,25 @@
           }
         },
         "url": "{{baseUrl}}/api/send"
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body;",
+              "try { body = pm.response.json(); } catch (_) {}",
+              "if (body && body.jobId) pm.collectionVariables.set('jobId', body.jobId);"
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "Sticker URL",
       "request": {
-        "description": "Send a prepared WhatsApp-compatible WebP sticker. Required: phone, type=sticker, url. Optional: mimetype, isAnimated. isAnimated describes the file and does not create animation. Captions and viewOnce are not accepted. Maximum file size: 1 MiB. Replace the placeholder URL.",
+        "description": "Send a prepared WhatsApp-compatible WebP sticker up to 512 pixels per side. Required: phone, type=sticker, url. Optional: mimetype, isAnimated. isAnimated must match the file and is detected when omitted. Captions and viewOnce are not accepted. Maximum file size: 1 MiB. Replace the placeholder URL.",
         "method": "POST",
         "header": [
           {
@@ -223,7 +306,20 @@
           }
         },
         "url": "{{baseUrl}}/api/send"
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body;",
+              "try { body = pm.response.json(); } catch (_) {}",
+              "if (body && body.jobId) pm.collectionVariables.set('jobId', body.jobId);"
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "Static location",
@@ -252,7 +348,20 @@
           }
         },
         "url": "{{baseUrl}}/api/send"
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body;",
+              "try { body = pm.response.json(); } catch (_) {}",
+              "if (body && body.jobId) pm.collectionVariables.set('jobId', body.jobId);"
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "Contact cards",
@@ -281,7 +390,20 @@
           }
         },
         "url": "{{baseUrl}}/api/send"
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body;",
+              "try { body = pm.response.json(); } catch (_) {}",
+              "if (body && body.jobId) pm.collectionVariables.set('jobId', body.jobId);"
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "Poll",
@@ -310,7 +432,20 @@
           }
         },
         "url": "{{baseUrl}}/api/send"
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body;",
+              "try { body = pm.response.json(); } catch (_) {}",
+              "if (body && body.jobId) pm.collectionVariables.set('jobId', body.jobId);"
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "Image file upload",
@@ -355,6 +490,76 @@
           ]
         },
         "url": "{{baseUrl}}/api/send"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body;",
+              "try { body = pm.response.json(); } catch (_) {}",
+              "if (body && body.jobId) pm.collectionVariables.set('jobId', body.jobId);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get message status",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          }
+        ],
+        "url": "{{baseUrl}}/api/messages/{{jobId}}",
+        "description": "Poll a job returned by POST /api/send. The send response saves jobId automatically. Authenticated response: {success:true,job:{jobId,status,attempts,timestamps,messageId?,error?}}. sent does not mean delivered; read requires a reliable acknowledgement. A missing retained record returns404 and does not prove that no message was sent."
+      }
+    },
+    {
+      "name": "Queue statistics",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          }
+        ],
+        "url": "{{baseUrl}}/api/queue/stats",
+        "description": "Authenticated local queue/staging counters and connection state. In-memory data is not durable across restarts. No recipient or message content is included."
+      }
+    },
+    {
+      "name": "Process liveness",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/live",
+        "description": "Public process liveness. Returns200 while the HTTP process is reachable, even when WhatsApp is disconnected."
+      }
+    },
+    {
+      "name": "Worker readiness",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/ready",
+        "description": "Public WhatsApp and admission readiness. Returns200 when ready,503 when disconnected, full, or draining. No keys, QR codes, phone numbers or message content."
+      }
+    },
+    {
+      "name": "WhatsApp ping",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/ping",
+        "description": "Existing public WhatsApp readiness endpoint. Returns200 when connected,503 otherwise. Queue capacity is reported through /ready and authenticated stats."
       }
     }
   ]
