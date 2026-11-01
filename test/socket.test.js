@@ -29,6 +29,47 @@ function deferred() {
 
 const settle = () => new Promise(setImmediate)
 
+test("managed socket storage is configured before loading auth and suppresses terminal QR", async () => {
+ const manager = loadSocket()
+ const root = path.join(osTemporaryRoot(), "managed-configured-data")
+ manager.configureStorage({ dataDir: root, managed: true })
+ await manager.startWhatsApp()
+ assert.equal(manager.authPaths[0], path.join(root, "auth"))
+ manager.sockets[0].ev.emit("connection.update", { qr: "private-managed-qr" })
+ assert.equal(manager.qrCodes.length, 0)
+ assert.throws(() => manager.configureStorage({ dataDir: root, managed: true }), /running/)
+ await manager.stopWhatsApp()
+})
+
+test("managed reset removes only configured fixed children after confirmed logout", async () => {
+ let logoutCalls = 0
+ const manager = loadSocket({
+  authFactory: async () => ({ state: { creds: { registered: true } }, saveCreds: async () => {} }),
+  makeSocket: () => ({ ev: new EventEmitter(), logout: async () => { logoutCalls++ }, end() {} })
+ })
+ const root = path.join(osTemporaryRoot(), "managed-reset-data")
+ manager.configureStorage({ dataDir: root, managed: true })
+ await manager.startWhatsApp()
+ await manager.resetWhatsApp()
+ assert.equal(logoutCalls, 1)
+ assert.deepEqual(manager.removedPaths, [path.join(root, "auth"), path.join(root, "auth-backups")])
+ assert.equal(manager.getConnectionStatus().state, "stopped")
+})
+
+test("managed reset keeps linked credentials when logout cannot be confirmed", async () => {
+ const manager = loadSocket({
+  authFactory: async () => ({ state: { creds: { registered: true } }, saveCreds: async () => {} }),
+  makeSocket: () => ({ ev: new EventEmitter(), logout: async () => { throw new Error("offline revocation") }, end() {} })
+ })
+ manager.configureStorage({ dataDir: path.join(osTemporaryRoot(), "managed-reset-failure"), managed: true })
+ await manager.startWhatsApp()
+ await assert.rejects(manager.resetWhatsApp(), /offline revocation/)
+ assert.equal(manager.removedPaths.length, 0)
+ await manager.stopWhatsApp()
+})
+
+function osTemporaryRoot() { return require("node:os").tmpdir() }
+
 function loadSocket(options = {}) {
  const sockets = []
  const authPaths = []
@@ -36,6 +77,7 @@ function loadSocket(options = {}) {
  const qrCodes = []
  const archivedPaths = []
  const createdDirectories = []
+ const removedPaths = []
  const errors = []
  let timerId = 0
  let now = Date.parse("2026-01-01T00:00:00.000Z")
@@ -89,7 +131,9 @@ function loadSocket(options = {}) {
     async rename(from, to) {
      archivedPaths.push({ from, to })
      if (options.rename) return options.rename(from, to)
-    }
+    },
+    async readFile() { return JSON.stringify(options.storedCredentials || {}) },
+    async rm(directory) { removedPaths.push(directory); if (options.rm) return options.rm(directory) }
    }
    if (name === "node:crypto") return { randomUUID: () => "test-unique-id" }
    if (name === "@whiskeysockets/baileys") return fakeBaileys
@@ -119,6 +163,7 @@ function loadSocket(options = {}) {
   qrCodes,
   archivedPaths,
   createdDirectories,
+  removedPaths,
   errors,
   get authCalls() { return authCalls },
   get saveCalls() { return saveCalls },

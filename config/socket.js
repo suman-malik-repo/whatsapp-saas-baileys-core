@@ -10,7 +10,9 @@ const {
 const qrcode = require("qrcode-terminal")
 const P = require("pino")
 
-const authDirectory = path.join(__dirname, "..", "auth")
+let authDirectory = path.join(__dirname, "..", "auth")
+let backupDirectory = path.join(__dirname, "..", "auth-backups")
+let managedStorage = false
 const qrLifetimeMs = 20000
 const terminalDisconnects = new Set([
  DisconnectReason.loggedOut,
@@ -324,8 +326,10 @@ function startWhatsApp() {
     qrExpiresAt = qrGeneratedAt + qrLifetimeMs
     socketHasQr = true
     state = "qr_required"
-    console.log("Scan the WhatsApp QR code in this terminal")
-    qrcode.generate(update.qr, { small: true })
+    if (!managedStorage) {
+     console.log("Scan the WhatsApp QR code in this terminal")
+     qrcode.generate(update.qr, { small: true })
+    }
     finishQrRequests()
    } else if (update.connection === "connecting" && !qr) {
     state = "connecting"
@@ -385,7 +389,6 @@ async function prepareQr(fresh) {
   const maintenance = Promise.resolve(previousInitialization).then(async () => {
    await credentialsQueue
    if (!running || attempt !== generation || credentialsFailed) return false
-   const backupDirectory = path.join(__dirname, "..", "auth-backups")
    await fs.mkdir(backupDirectory, { recursive: true })
    if (!running || attempt !== generation || credentialsFailed) return false
    const backupPath = path.join(backupDirectory, `${Date.now()}-${randomUUID()}`)
@@ -509,7 +512,55 @@ function getConnectionStatus() {
  }
 }
 
+function configureStorage({ dataDir, managed = false }) {
+ if (running || socket || initialization || authMaintenance) throw new Error("Cannot change storage while WhatsApp is running")
+ if (typeof dataDir !== "string" || !path.isAbsolute(dataDir)) throw new Error("DATA_DIR must be an absolute path")
+ const directory = path.resolve(dataDir)
+ authDirectory = path.join(directory, "auth")
+ backupDirectory = path.join(directory, "auth-backups")
+ managedStorage = managed
+}
+
+async function resetWhatsApp() {
+ // Never delete a still-linked account when remote revocation is unconfirmed.
+ // Offline linked workers remain quarantined until an operator recovers them.
+ await initialization
+ if (managedStorage && !activeAuth) {
+  try {
+   const stored = JSON.parse(await fs.readFile(path.join(authDirectory, "creds.json"), "utf8"))
+   linkedSession = Boolean(stored.registered || stored.me?.id)
+  } catch (error) { if (error.code !== "ENOENT") throw error }
+ }
+ if (linkedSession && lastDisconnectCode !== DisconnectReason.loggedOut) {
+  // Managed callers have already confirmed this disk's assignment. Reconnect
+  // solely to obtain server-confirmed revocation during operator recovery.
+  if (!socket && managedStorage) await startWhatsApp()
+  if (!socket || typeof socket.logout !== "function") throw new Error("Linked WhatsApp account cannot be revoked while offline")
+  let timeout
+  try {
+   await Promise.race([socket.logout(), new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error("WhatsApp logout timed out")), 15000)
+   })])
+  } finally { if (timeout) clearTimeout(timeout) }
+ }
+ await stopWhatsApp()
+ await initialization
+ await credentialsQueue
+ if (authMaintenance) await authMaintenance
+ // Both targets are fixed children of the configured data root, never request
+ // paths. Check the resolved relationship before recursively removing either.
+ const root = path.dirname(authDirectory)
+ for (const directory of [authDirectory, backupDirectory]) {
+  if (path.dirname(path.resolve(directory)) !== root || !["auth", "auth-backups"].includes(path.basename(directory))) throw new Error("Invalid WhatsApp storage target")
+  await fs.rm(directory, { recursive: true, force: true })
+ }
+ activeAuth = null; linkedSession = false; pairingInProgress = false
+ socketHasQr = false; lastDisconnectCode = null; reconnectAttempts = 0
+ credentialsFailed = false; refreshingGeneration = null
+ publishConnection()
+}
+
 module.exports = {
  startWhatsApp, stopWhatsApp, getSocket, getConnectionStatus, getQrStatus, requestQr,
- subscribeConnection, subscribeMessageUpdates
+ subscribeConnection, subscribeMessageUpdates, configureStorage, resetWhatsApp
 }

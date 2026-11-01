@@ -4,11 +4,12 @@ const requireApiKey = require("./middleware/apiKey")
 const { createQrRouter } = require("./routes/qrRoutes")
 
 function createApp(options = {}) {
+ const managedWorker = options.managedWorker
  const apiKey = options.apiKey === undefined ? API_KEY : options.apiKey
  const authenticate = requireApiKey(apiKey)
- const worker = options.worker || (!options.messageRouter ? require("./services/messageWorker").createMessageWorker(options.workerOptions) : null)
+ const worker = managedWorker || options.worker || (!options.messageRouter ? require("./services/messageWorker").createMessageWorker(options.workerOptions) : null)
  const getConnectionStatus = options.getConnectionStatus || worker?.getConnectionStatus || require("./config/socket").getConnectionStatus
- const messageRouter = options.messageRouter || require("./routes/messageRoutes").createMessageRouter({ worker })
+ const messageRouter = managedWorker ? null : options.messageRouter || require("./routes/messageRoutes").createMessageRouter({ worker })
  const app = express()
  app.locals.messageWorker = worker
 
@@ -34,11 +35,14 @@ function createApp(options = {}) {
   res.status(readiness.ready ? 200 : 503).json({ status: readiness.ready ? "ready" : "not_ready", state: readiness.state })
  })
 
- app.use("/qr", createQrRouter({ apiKey, getQrStatus: options.getQrStatus, requestQr: options.requestQr }))
-
- app.use("/api", authenticate)
- app.use(express.json({ limit: "32kb" }))
- app.use("/api", messageRouter)
+ if (managedWorker) {
+  app.use("/internal/v1", require("./routes/managedRoutes").createManagedRouter(managedWorker))
+ } else {
+  app.use("/qr", createQrRouter({ apiKey, getQrStatus: options.getQrStatus, requestQr: options.requestQr }))
+  app.use("/api", authenticate)
+  app.use(express.json({ limit: "32kb" }))
+  app.use("/api", messageRouter)
+ }
 
  app.use((req, res) => {
   res.status(404).json({ success: false, error: "Not found" })
@@ -59,7 +63,7 @@ function createApp(options = {}) {
    return res.status(415).json({ success: false, error: "Unsupported request encoding" })
   }
 
-  if (error.expose === true && [400, 408, 409, 410, 413, 415, 429, 502, 503, 504].includes(error.status)) {
+  if (error.expose === true && [400, 404, 408, 409, 410, 413, 415, 429, 502, 503, 504].includes(error.status)) {
    if (error.status === 429) res.set("Retry-After", "1")
    return res.status(error.status).json({ success: false, error: error.message, ...(error.code ? { code: error.code } : {}) })
   }

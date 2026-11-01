@@ -2,16 +2,21 @@ const { createApp } = require("./app")
 const { createMessageWorker } = require("./services/messageWorker")
 
 function startServer(options = {}) {
+ const env = options.env || process.env
+ const managed = options.managed ?? env.MANAGED_MODE === "true"
  const connection = options.connection || require("./config/socket")
- const worker = options.worker || createMessageWorker({ connection, ...options.workerOptions })
- const app = createApp({ worker, ...options.appOptions })
+ if (managed && connection.configureStorage) connection.configureStorage({ dataDir: env.DATA_DIR, managed: true })
+ const worker = options.worker || (managed
+  ? require("./services/managedWorker").createManagedWorker({ env, connection, ...options.workerOptions })
+  : createMessageWorker({ connection, ...options.workerOptions }))
+ const app = createApp({ worker, ...(managed ? { managedWorker: worker } : {}), ...options.appOptions })
  const server = app.listen(options.port ?? process.env.PORT ?? 3000, options.host || "0.0.0.0")
  let shutdownPromise
 
  server.once("listening", () => {
   if (shutdownPromise) return
   console.log("Server running on port", server.address().port)
-  Promise.resolve().then(() => { if (!shutdownPromise) return connection.startWhatsApp() }).catch(() => {
+  Promise.resolve().then(() => { if (!shutdownPromise) return managed ? worker.start() : connection.startWhatsApp() }).catch(() => {
    console.error("WhatsApp startup failed")
   })
  })

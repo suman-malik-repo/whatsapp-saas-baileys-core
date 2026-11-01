@@ -4,13 +4,17 @@ One linked WhatsApp account sends text, images, video, audio/voice notes,
 documents, stickers, locations, contact cards, and polls over an HTTP API.
 Validated requests enter a bounded local queue with per-session FIFO,
 concurrency limits, pacing, safe retries, and delivery/read status tracking.
-The queue is in memory: jobs and status records do not survive a process exit.
+In standalone mode the queue is in memory: jobs and status records do not
+survive a process exit. Managed Render mode uses a durable file journal and
+Cloudflare-owned execution; see the [managed worker guide](docs/MANAGED_WORKER.md).
 Node.js 24 was used to verify this project.
 Baileys is pinned to the tested security release `7.0.0-rc14`; the lockfile
 records the patched dependency versions. Use `npm ci` for repeatable installs.
 
 ## Documentation
 
+- [Managed Render worker](docs/MANAGED_WORKER.md): signed gateway protocol,
+  persistent deployment, ownership fencing, media ingestion and safe reuse.
 - [Message API usage](docs/MESSAGE_API.md): setup, every request type, required
   and optional fields, Postman, cURL, PowerShell, backend examples, and errors.
 - [Postman collection](postman/Baileys-WhatsApp.postman_collection.json): import

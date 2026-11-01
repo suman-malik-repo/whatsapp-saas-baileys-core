@@ -2,3 +2,7 @@ node_modules/
 /auth/
 /auth-backups/
 *.log
+/data/
+/.env
+/.env.*
+!/.env.example
