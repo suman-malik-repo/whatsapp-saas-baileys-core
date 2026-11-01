@@ -407,8 +407,6 @@ function createManagedWorker(options = {}) {
  }
  async function inspectMedia(body, importing = false) {
   assertAssignment(body); validId(body.operationId); validId(body.mediaId)
-  const previous = operationState(snapshot(), body)
-  if (previous?.result) return previous.result
   if (!Object.hasOwn(MEDIA_LIMITS, body.type)) throw managedError(400, "INVALID_MEDIA_TYPE", "Unsupported media type")
   if (importing) {
    let source
@@ -416,6 +414,11 @@ function createManagedWorker(options = {}) {
    if (source.protocol !== "https:") throw managedError(400, "INVALID_MEDIA_URL", "Media imports require HTTPS")
   }
   const url = importing ? body.url : trustedMediaUrl(body.url)
+  // Download grants are short lived. Reissuing one must not change the identity
+  // of an inspection of the same immutable media object.
+  const operationBody = importing ? body : { ...body, url: undefined }
+  const previous = operationState(snapshot(), operationBody)
+  if (previous?.result) return previous.result
   let staged
   try {
    const built = buildMessagePayload({ phone: "12025550123", type: body.type, url, ...(body.mimetype ? { mimetype: body.mimetype } : {}) })
@@ -442,7 +445,7 @@ function createManagedWorker(options = {}) {
     await journal.update((data) => { data.outbox.push({ path: `/internal/v1/media/${body.mediaId}/result`, body: { eventId, assignmentId: body.assignmentId, fence: body.fence, success: true, ...result, etag: response.headers.get("etag") }, createdAt: now() }) })
     void flush()
    }
-   await journal.update((data) => { data.operations[body.operationId] = { hash: fingerprint(body), result, at: now() } })
+   await journal.update((data) => { data.operations[body.operationId] = { hash: fingerprint(operationBody), result, at: now() } })
    return result
   } catch (error) {
    if (importing) {

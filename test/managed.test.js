@@ -292,6 +292,7 @@ test("managed media requires owned origins and exact immutable byte metadata", a
  assert.equal(result.size, bytes.length)
  const previousCleans = cleans
  assert.deepEqual(await f.worker.inspect(body), result)
+ assert.deepEqual(await f.worker.inspect({ ...body, url: body.url + "-renewed" }), result)
  assert.equal(cleans, previousCleans)
  await assert.rejects(f.worker.inspect({ ...body, operationId: "import-1", url: "http://example.com/image.png" }, true), { code: "INVALID_MEDIA_URL" })
 })
