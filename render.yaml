@@ -1,11 +1,12 @@
-# Reference template. The SaaS provisioner creates equivalent dedicated services.
-# Configure WORKER_ID/WORKER_SECRET/GATEWAY_URL and register the worker with the
-# gateway BEFORE first boot. Do not deploy this without a persistent disk.
+# Manual testing deployment: no persistent disk. Local state is disposable.
+# See docs/RENDER_DEPLOYMENT.md before deploying, especially recovery/re-pairing.
+# Keep the repository private and connect Render's GitHub integration.
+# render.persistent.yaml is the optional paid/disk alternative.
 services:
   - type: web
     name: whatsapp-managed-worker
     runtime: node
-    plan: starter
+    plan: free
     region: singapore
     numInstances: 1
     autoDeployTrigger: off
@@ -19,15 +20,13 @@ services:
         value: production
       - key: MANAGED_MODE
         value: "true"
+      - key: MANAGED_STORAGE_MODE
+        value: ephemeral
       - key: DATA_DIR
-        value: /var/data
+        value: /tmp/whatsapp-data
       - key: WORKER_ID
         sync: false
       - key: WORKER_SECRET
         sync: false
       - key: GATEWAY_URL
         sync: false
-    disk:
-      name: whatsapp-session
-      mountPath: /var/data
-      sizeGB: 1

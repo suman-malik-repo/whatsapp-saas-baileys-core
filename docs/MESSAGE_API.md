@@ -66,10 +66,12 @@ Content-Type: application/json
 }
 ```
 
-Use the configured static key from `config/apiKey.js`, or the `API_KEY`
-environment override if one was set when the server started. `YOUR_API_KEY`
-is a placeholder. Use an `x-api-key` header; query parameters, bearer tokens,
-and JSON body fields do not authenticate requests.
+Set a private static key in the server's `API_KEY` environment variable before
+starting standalone mode. `YOUR_API_KEY` is a placeholder; no built-in testing
+key is supplied. Use an `x-api-key` header; query parameters, bearer tokens,
+and JSON body fields do not authenticate these standalone requests. Managed
+Render mode disables these routes and uses the Cloudflare SaaS API instead;
+see [manual Render setup](RENDER_DEPLOYMENT.md).
 
 All message types use **`POST /api/send`** with the same `x-api-key` header.
 The recipient is always a string `phone` containing the full country code.
@@ -941,7 +943,7 @@ and known WhatsApp IDs in your calling service. See
 | A job stays `queued` or `retry_wait` | Check connection, session FIFO head, pacing, queue age, and `/api/queue/stats`; do not create another job |
 | A request returns `429` | Respect `Retry-After` and reduce admission; inspect queue/staging/upload usage |
 | A job is `unknown` | Sending may have occurred; poll for late acknowledgements and investigate before any manual replacement |
-| Every send returns `401` | Replace `YOUR_API_KEY`/`{{apiKey}}` and check for an active `API_KEY` override on the server |
+| Every send returns `401` | Replace `YOUR_API_KEY`/`{{apiKey}}` with the server's configured `API_KEY` |
 | JSON returns `400` | Use **raw > JSON**, keep `phone` as a string, use numbers/booleans with their actual JSON types, and remove irrelevant fields |
 | Postman upload says file missing | Use **form-data**, change `file` from Text to File, and select a nonempty file |
 | Upload fails after changing its type | Remove incompatible optional fields from the original image upload template |

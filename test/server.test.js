@@ -97,3 +97,35 @@ test("shutdown before listening cannot start a late WhatsApp connection", async 
  assert.equal(manager.stopped, true)
  assert.equal(server.listening, false)
 })
+
+test("server uses its supplied PORT and API_KEY environment for standalone HTTP", async (t) => {
+ const manager = connection()
+ const previousPort = process.env.PORT
+ let server
+ try {
+  process.env.PORT = "-1"
+  server = startServer({ env: { PORT: "0", API_KEY: "offline-environment-key" },
+   host: "127.0.0.1", connection: manager, workerOptions: { config: { drainMs: 0 } } })
+ } finally {
+  if (previousPort === undefined) delete process.env.PORT
+  else process.env.PORT = previousPort
+ }
+ t.after(() => server.shutdown())
+ await once(server, "listening")
+ const base = `http://127.0.0.1:${server.address().port}`
+ assert.equal((await fetch(`${base}/live`)).status, 200)
+ assert.equal((await fetch(`${base}/api/queue/stats`)).status, 401)
+ assert.equal((await fetch(`${base}/api/queue/stats`, {
+  headers: { "x-api-key": "offline-environment-key" }
+ })).status, 200)
+})
+
+test("invalid ports fail before starting a worker or network listener", () => {
+ const manager = connection()
+ for (const PORT of ["-1", "65536", "3000.5", "not-a-port", "", " 3000 "]) {
+  assert.throws(() => startServer({ env: { PORT, API_KEY: "offline-environment-key" },
+   connection: manager }), /PORT must be an integer/)
+ }
+ assert.equal(manager.changes.size, 0)
+ assert.equal(manager.updates.size, 0)
+})

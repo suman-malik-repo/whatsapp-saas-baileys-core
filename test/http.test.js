@@ -126,3 +126,30 @@ test("HTTP authentication, readiness, and JSON responses", async (t) => {
 test("an explicitly empty API key is rejected at app creation", () => {
  assert.throws(() => createApp({ apiKey: "", getConnectionStatus: () => ({}), messageRouter: express.Router() }), /API key/)
 })
+
+test("standalone startup requires an environment API key when none is injected", () => {
+ for (const API_KEY of [undefined, "", "   "]) {
+  assert.throws(() => createApp({ env: { API_KEY }, getConnectionStatus: () => ({}),
+   messageRouter: express.Router() }), /API_KEY must be configured/)
+ }
+})
+
+test("managed HTTP starts without a standalone API key and keeps local ingress disabled", async (t) => {
+ const managedWorker = {
+  workerId: "offline-managed-worker", secret: "offline-worker-secret-with-at-least-32-bytes",
+  getConnectionStatus: () => ({ state: "stopped", connected: false }),
+  readiness: () => ({ ready: false, state: "unassigned" })
+ }
+ const app = createApp({ managedWorker, env: {}, apiKey: "" })
+ const server = app.listen(0, "127.0.0.1")
+ await once(server, "listening")
+ t.after(() => new Promise((resolve) => {
+  server.close(resolve)
+  server.closeAllConnections()
+ }))
+ const base = `http://127.0.0.1:${server.address().port}`
+ assert.equal((await fetch(`${base}/live`)).status, 200)
+ assert.equal((await fetch(`${base}/internal/v1/capabilities`)).status, 401)
+ assert.equal((await fetch(`${base}/api/send`, { method: "POST" })).status, 404)
+ assert.equal((await fetch(`${base}/qr`)).status, 404)
+})

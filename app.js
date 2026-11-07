@@ -1,12 +1,17 @@
 const express = require("express")
-const API_KEY = require("./config/apiKey")
 const requireApiKey = require("./middleware/apiKey")
 const { createQrRouter } = require("./routes/qrRoutes")
 
 function createApp(options = {}) {
  const managedWorker = options.managedWorker
- const apiKey = options.apiKey === undefined ? API_KEY : options.apiKey
- const authenticate = requireApiKey(apiKey)
+ let apiKey, authenticate
+ if (!managedWorker) {
+  apiKey = options.apiKey === undefined ? (options.env || process.env).API_KEY : options.apiKey
+  if (typeof apiKey !== "string" || !apiKey.trim()) {
+   throw new Error("API_KEY must be configured as a nonempty API key in standalone mode")
+  }
+  authenticate = requireApiKey(apiKey)
+ }
  const worker = managedWorker || options.worker || (!options.messageRouter ? require("./services/messageWorker").createMessageWorker(options.workerOptions) : null)
  const getConnectionStatus = options.getConnectionStatus || worker?.getConnectionStatus || require("./config/socket").getConnectionStatus
  const messageRouter = managedWorker ? null : options.messageRouter || require("./routes/messageRoutes").createMessageRouter({ worker })

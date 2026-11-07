@@ -4,13 +4,16 @@ const { createMessageWorker } = require("./services/messageWorker")
 function startServer(options = {}) {
  const env = options.env || process.env
  const managed = options.managed ?? env.MANAGED_MODE === "true"
+ const rawPort = options.port ?? env.PORT ?? 3000
+ const port = typeof rawPort === "string" && /^\d+$/.test(rawPort) ? Number(rawPort) : rawPort
+ if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("PORT must be an integer between 0 and 65535")
  const connection = options.connection || require("./config/socket")
  if (managed && connection.configureStorage) connection.configureStorage({ dataDir: env.DATA_DIR, managed: true })
  const worker = options.worker || (managed
   ? require("./services/managedWorker").createManagedWorker({ env, connection, ...options.workerOptions })
-  : createMessageWorker({ connection, ...options.workerOptions }))
- const app = createApp({ worker, ...(managed ? { managedWorker: worker } : {}), ...options.appOptions })
- const server = app.listen(options.port ?? process.env.PORT ?? 3000, options.host || "0.0.0.0")
+  : createMessageWorker({ env, connection, ...options.workerOptions }))
+ const app = createApp({ env, worker, ...(managed ? { managedWorker: worker } : {}), ...options.appOptions })
+ const server = app.listen(port, options.host || "0.0.0.0")
  let shutdownPromise
 
  server.once("listening", () => {

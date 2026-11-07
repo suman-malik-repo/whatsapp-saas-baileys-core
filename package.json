@@ -2,6 +2,9 @@
   "name": "baileys",
   "version": "1.0.0",
   "main": "server.js",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "test": "node --test",
     "start": "node server.js"

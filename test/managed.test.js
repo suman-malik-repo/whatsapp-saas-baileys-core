@@ -4,7 +4,7 @@ const fs = require("node:fs/promises")
 const os = require("node:os")
 const path = require("node:path")
 const { createHash } = require("node:crypto")
-const { signature } = require("../services/managedProtocol")
+const { signature, managedError } = require("../services/managedProtocol")
 const { createManagedJournal } = require("../services/managedJournal")
 const { createManagedWorker } = require("../services/managedWorker")
 const { createApp } = require("../app")
@@ -24,6 +24,13 @@ async function eventually(check) {
 }
 async function fixture(t, options = {}) {
  const dataDir = options.dataDir || await directory(t)
+ // Most fixtures represent an existing, reconciled assignment. Fresh storage
+ // with an already remote-owned assignment is covered explicitly below.
+ if (!options.dataDir && !options.unassigned) {
+  const journal = await createManagedJournal({ dataDir })
+  await journal.update((data) => { data.assignment = assignment; data.state = "assigned" })
+  await journal.close()
+ }
  const calls = [], receipts = new Set()
  let sends = 0, starts = 0, resets = 0, connected = true
  const connection = {
@@ -47,9 +54,9 @@ async function fixture(t, options = {}) {
   if (url.endsWith("/send-start")) return { authorized: true, leaseExpiresAt: Date.now() + 60000, authorizationExpiresAt: Date.now() + 10000 }
   return { success: true }
  }
- const worker = createManagedWorker({ env: { WORKER_ID: "worker-1", WORKER_SECRET: secret, DATA_DIR: dataDir, GATEWAY_URL: "https://gateway.example" },
+ const worker = createManagedWorker({ env: { WORKER_ID: "worker-1", WORKER_SECRET: secret, DATA_DIR: dataDir, GATEWAY_URL: "https://gateway.example", ...options.env },
   connection, gateway, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}), ...(options.staging ? { staging: options.staging } : {}), minIntervalMs: 0, sendTimeoutMs: options.sendTimeoutMs || 1000,
-  generateMessageId: () => "OFFLINE-MANAGED-ID" })
+  bootstrapRetryMs: options.bootstrapRetryMs ?? 5, generateMessageId: () => "OFFLINE-MANAGED-ID" })
  await worker.start()
  t.after(async () => { await worker.shutdown(); await fs.rm(dataDir, { recursive: true, force: true }) })
  const dispatch = (overrides = {}) => worker.dispatch({ jobId: "job-1", tenantId: "tenant-1", assignmentId: "assignment-1", assignmentFence: 1,
@@ -100,6 +107,131 @@ test("bootstrap reconciles assignment before any credential load", async (t) => 
  assert.equal(f.starts, 0)
  assert.equal(f.calls[0].url, "/internal/v1/workers/worker-1/assignment")
  assert.equal(f.worker.capabilities().clean, false)
+})
+
+test("storage capabilities default to ephemeral and require explicit persistent mode", async (t) => {
+ const ephemeral = await fixture(t)
+ assert.equal(ephemeral.worker.capabilities().storageMode, "ephemeral")
+ assert.equal(ephemeral.worker.capabilities().durable, false)
+ const persistent = await fixture(t, { env: { MANAGED_STORAGE_MODE: "persistent" } })
+ assert.equal(persistent.worker.capabilities().durable, true)
+ assert.throws(() => createManagedWorker({ env: { WORKER_ID: "worker-1", WORKER_SECRET: secret,
+  DATA_DIR: ephemeral.dataDir, MANAGED_STORAGE_MODE: "typo" }, connection: ephemeral.connection }), /MANAGED_STORAGE_MODE/)
+})
+
+test("manual registration can recover bootstrap without loading auth or restarting", async (t) => {
+ let registered = false, probes = 0
+ const f = await fixture(t, { unassigned: true, gateway: async (url) => {
+  if (url.endsWith("/assignment")) {
+   probes++
+   if (!registered) throw managedError(503, "GATEWAY_UNAVAILABLE", "Not registered yet")
+   return { assignment: null }
+  }
+ } })
+ assert.equal(f.worker.readiness().ready, false)
+ assert.equal(f.worker.readiness().state, "GATEWAY_RECONCILIATION_PENDING")
+ assert.equal(f.worker.capabilities().clean, false)
+ assert.equal(f.starts, 0)
+ await assert.rejects(f.dispatch(), { code: "WORKER_QUARANTINED" })
+ registered = true
+ await eventually(() => f.worker.capabilities().clean)
+ assert.ok(probes >= 2)
+ assert.equal(f.starts, 0)
+})
+
+test("malformed authoritative assignment fails closed instead of becoming clean", async (t) => {
+ const f = await fixture(t, { unassigned: true, gateway: async (url) => url.endsWith("/assignment") ? {} : undefined })
+ assert.equal(f.worker.readiness().state, "BOOTSTRAP_RECONCILIATION_FAILED")
+ assert.equal(f.worker.capabilities().clean, false)
+ assert.equal(f.starts, 0)
+})
+
+test("lost local assignment permits owned pairing but cannot falsely confirm clean reuse", async (t) => {
+ const f = await fixture(t, { dataDir: await directory(t) })
+ assert.equal(f.worker.capabilities().localStateLost, true)
+ assert.equal(f.starts, 0)
+ await f.worker.pairing({ operationId: "pair-after-loss", assignmentId: assignment.id, fence: 1 })
+ assert.equal(f.starts, 1)
+ await assert.rejects(f.worker.reset({ operationId: "reset-after-loss", assignmentId: assignment.id, fence: 1 }), { code: "SESSION_STATE_LOST" })
+ assert.equal(f.resets, 0)
+ assert.equal(f.worker.capabilities().clean, false)
+ assert.equal(f.worker.readiness().state, "SESSION_STATE_LOST")
+ assert.equal(f.worker.debugSnapshot().assignment.id, assignment.id)
+ assert.equal(f.worker.debugSnapshot().localStateLost, true)
+})
+
+test("lost-state evidence survives a process restart with the journal intact", async (t) => {
+ const dataDir = await directory(t)
+ const journal = await createManagedJournal({ dataDir })
+ await journal.update((data) => { data.assignment = assignment; data.state = "assigned"; data.localStateLost = true })
+ await journal.close()
+ const f = await fixture(t, { dataDir })
+ assert.equal(f.worker.capabilities().localStateLost, true)
+ await assert.rejects(f.worker.reset({ operationId: "reset-after-restart", assignmentId: assignment.id, fence: 1 }), { code: "SESSION_STATE_LOST" })
+ assert.equal(f.resets, 0)
+})
+
+test("shutdown waits for an in-flight bootstrap and prevents late socket starts", async (t) => {
+ let resolveLookup
+ const lookup = new Promise((resolve) => { resolveLookup = resolve })
+ const f = await fixture(t, { unassigned: true, gateway: async (url) => {
+  if (url.endsWith("/assignment")) throw managedError(503, "GATEWAY_UNAVAILABLE", "Try again")
+ } })
+ // A separate worker exercises shutdown while its first lookup is pending.
+ const dataDir = await directory(t)
+ const worker = createManagedWorker({ env: { WORKER_ID: "worker-2", WORKER_SECRET: secret, DATA_DIR: dataDir,
+  GATEWAY_URL: "https://gateway.example" }, connection: f.connection, gateway: async () => lookup })
+ const starting = worker.start()
+ await eventually(() => worker.debugSnapshot() !== undefined)
+ const stopping = worker.shutdown()
+ resolveLookup({ assignment })
+ await starting; await stopping
+ assert.equal(worker.readiness().ready, false)
+ assert.equal(f.starts, 0)
+ await fs.rm(dataDir, { recursive: true, force: true })
+})
+
+test("shutdown during credential loading cannot start a late WhatsApp connection", async (t) => {
+ const dataDir = await directory(t), credentialsPath = path.join(dataDir, "auth", "creds.json")
+ const journal = await createManagedJournal({ dataDir })
+ await journal.update((data) => { data.assignment = assignment; data.state = "assigned" })
+ await journal.close()
+ await fs.mkdir(path.dirname(credentialsPath))
+ await fs.writeFile(credentialsPath, JSON.stringify({ registered: true }))
+ let releaseRead, beganRead, starts = 0
+ const reading = new Promise((resolve) => { beganRead = resolve })
+ const pendingRead = new Promise((resolve) => { releaseRead = resolve })
+ const originalRead = fs.readFile
+ t.mock.method(fs, "readFile", async (filename, ...args) => {
+  const result = await originalRead(filename, ...args)
+  if (filename === credentialsPath) { beganRead(); await pendingRead }
+  return result
+ })
+ const connection = { getConnectionStatus: () => ({ connected: false, state: "stopped" }),
+  async startWhatsApp() { starts++ }, async stopWhatsApp() {} }
+ const worker = createManagedWorker({ env: { WORKER_ID: "worker-1", WORKER_SECRET: secret, DATA_DIR: dataDir,
+  GATEWAY_URL: "https://gateway.example" }, connection, gateway: async () => ({ assignment }) })
+ t.after(async () => { releaseRead(); await worker.shutdown(); await fs.rm(dataDir, { recursive: true, force: true }) })
+ const starting = worker.start()
+ await reading
+ const stopping = worker.shutdown()
+ releaseRead()
+ await starting; await stopping
+ assert.equal(starts, 0)
+ assert.equal(worker.readiness().ready, false)
+})
+
+test("shutdown cancels registration retries and a stopped worker cannot reopen its journal", async (t) => {
+ let probes = 0
+ const f = await fixture(t, { unassigned: true, gateway: async (url) => {
+  if (url.endsWith("/assignment")) { probes++; throw managedError(503, "GATEWAY_UNAVAILABLE", "Not registered") }
+ } })
+ await f.worker.shutdown()
+ const before = probes
+ await f.worker.start()
+ await new Promise((resolve) => setTimeout(resolve, 30))
+ assert.equal(probes, before)
+ await assert.rejects(fs.access(path.join(f.dataDir, "managed-worker.lock")), { code: "ENOENT" })
 })
 
 test("unowned disk credentials quarantine bootstrap without loading auth", async (t) => {
@@ -257,7 +389,7 @@ test("managed HTTP requires HMAC over the exact raw body and disables local ingr
 
 test("unassigned worker allocation independently verifies gateway ownership", async (t) => {
  let remote = null
- const f = await fixture(t, { gateway: async (url) => url.endsWith("/assignment") ? { assignment: remote } : undefined })
+ const f = await fixture(t, { unassigned: true, gateway: async (url) => url.endsWith("/assignment") ? { assignment: remote } : undefined })
  assert.equal(f.worker.capabilities().clean, true)
  const body = { operationId: "allocate-1", assignmentId: assignment.id, tenantId: assignment.tenantId, fence: 1 }
  await assert.rejects(f.worker.assign(body), { code: "STALE_ASSIGNMENT" })

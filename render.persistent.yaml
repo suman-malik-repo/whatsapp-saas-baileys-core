@@ -1,0 +1,35 @@
+# Optional paid deployment that preserves local credentials and reporting state.
+# Select this Blueprint file explicitly; render.yaml is the no-disk default.
+# Keep one service instance and one unique identity/credential per account.
+services:
+  - type: web
+    name: whatsapp-managed-worker-persistent
+    runtime: node
+    plan: starter
+    region: singapore
+    numInstances: 1
+    autoDeployTrigger: off
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /live
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: NODE_ENV
+        value: production
+      - key: MANAGED_MODE
+        value: "true"
+      - key: MANAGED_STORAGE_MODE
+        value: persistent
+      - key: DATA_DIR
+        value: /var/data
+      - key: WORKER_ID
+        sync: false
+      - key: WORKER_SECRET
+        sync: false
+      - key: GATEWAY_URL
+        sync: false
+    disk:
+      name: whatsapp-session
+      mountPath: /var/data
+      sizeGB: 1

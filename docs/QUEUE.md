@@ -283,7 +283,8 @@ The retry maximum must be at least the retry base, and the staging lifetime
 must be at least the maximum job age. These relationships are validated at
 startup.
 
-`API_KEY` continues to override the configured static key. `PORT` continues
+Set `API_KEY` to your own static key for standalone API authentication; there
+is no built-in shared testing key. `PORT` continues
 to select the HTTP port, defaulting to 3000 locally. The existing JSON parser
 limit remains 32 KiB; increasing the internal queue payload limit does not
 increase the HTTP body limit or any per-media limit.
@@ -360,6 +361,11 @@ result is lost. Recreating that message can produce a duplicate. There is no
 exactly-once delivery guarantee, including after future durable coordination.
 
 ## Render deployment notes
+
+These notes describe the **standalone in-memory queue**. For the existing
+Cloudflare SaaS, use the [manual managed Render guide](RENDER_DEPLOYMENT.md),
+including its Free/no-disk environment and recovery procedure. Managed mode
+uses a file journal under `DATA_DIR`, not this standalone queue.
 
 Use a Render Node web service with this repository's root as the service root,
 `npm ci` as the build command, and `npm start` as the start command. Render

@@ -27,6 +27,8 @@ function createManagedWorker(options = {}) {
  const secret = env.WORKER_SECRET
  if (typeof secret !== "string" || Buffer.byteLength(secret) < 32) throw new Error("WORKER_SECRET must contain at least 32 bytes")
  if (!env.DATA_DIR || !path.isAbsolute(env.DATA_DIR)) throw new Error("Managed mode requires an absolute DATA_DIR")
+ const storageMode = env.MANAGED_STORAGE_MODE || "ephemeral"
+ if (!["ephemeral", "persistent"].includes(storageMode)) throw new Error("MANAGED_STORAGE_MODE must be ephemeral or persistent")
  const dataDir = path.resolve(env.DATA_DIR)
  const connection = options.connection || require("../config/socket")
  const gateway = options.gateway || createGatewayClient({ gatewayUrl: env.GATEWAY_URL, workerId, secret })
@@ -36,11 +38,13 @@ function createManagedWorker(options = {}) {
  const drainMs = options.drainMs ?? 10000
  const sendTimeoutMs = options.sendTimeoutMs ?? 90000
  const minIntervalMs = options.minIntervalMs ?? 1000
- let journal, boot, executing, shutdownPromise, timer, heartbeatBusy = false, flushing = false, stopped = false
+ const bootstrapRetryMs = options.bootstrapRetryMs ?? 15000
+ let journal, boot, bootstrapTask, bootstrapTimer, bootstrapRetries = 0, executing, shutdownPromise, timer, heartbeatBusy = false, flushing = false, stopped = false
  let ready = false, ownershipConfirmed = false, quarantineReason = null, nextSendAt = 0, control = Promise.resolve(), controlPending = 0
  const unsubscribeUpdates = connection.subscribeMessageUpdates?.((update) => receipt(update).catch(() => quarantine("JOURNAL_WRITE_FAILED")))
- const capabilities = () => ({ protocol: VERSION, protocolVersion: 1, version: VERSION, workerId, managed: true, durable: true,
-  clean: ready && !snapshot()?.assignment && snapshot()?.state === "unassigned" && !Object.keys(snapshot()?.jobs || {}).length && !snapshot()?.outbox.length,
+ const capabilities = () => ({ protocol: VERSION, protocolVersion: 1, version: VERSION, workerId, managed: true, durable: storageMode === "persistent", storageMode,
+  localStateLost: snapshot()?.localStateLost === true,
+  clean: ready && !snapshot()?.localStateLost && !snapshot()?.assignment && snapshot()?.state === "unassigned" && !Object.keys(snapshot()?.jobs || {}).length && !snapshot()?.outbox.length,
   messageTypes: ["text", ...Object.keys(MEDIA_LIMITS), "location", "contacts", "poll"], mediaLimits: MEDIA_LIMITS,
   lifecycle: true, mediaInspection: true, mediaImport: true })
  function snapshot() { return journal?.read() }
@@ -106,13 +110,35 @@ function createManagedWorker(options = {}) {
  }
  async function bootWorker() {
   if (boot) return boot
+  if (stopped) return
   boot = (async () => {
    try {
     journal = await createManagedJournal({ dataDir,
      maxJobs: boundedSetting(env, "MANAGED_JOURNAL_MAX_JOBS", 10000, 100000),
      maxEvents: boundedSetting(env, "MANAGED_JOURNAL_MAX_EVENTS", 20000, 200000),
      maxBytes: boundedSetting(env, "MANAGED_JOURNAL_MAX_BYTES", 16 * 1024 * 1024, 256 * 1024 * 1024) })
-    const remote = await gateway(`/internal/v1/workers/${workerId}/assignment`, undefined, "GET")
+   } catch { await quarantine("JOURNAL_INITIALIZATION_FAILED"); return }
+   if (!stopped) { bootstrapTask = reconcileBootstrap(); await bootstrapTask }
+  })()
+  return boot
+ }
+ async function reconcileBootstrap() {
+  if (stopped) return
+  let remote
+  try { remote = await gateway(`/internal/v1/workers/${workerId}/assignment`, undefined, "GET") }
+  catch (error) {
+   if (stopped) return
+   if (error.code !== "GATEWAY_UNAVAILABLE") { await quarantine("BOOTSTRAP_RECONCILIATION_FAILED"); return }
+   // New manual services may boot before registration. Keep the HTTP liveness
+   // endpoint available, but never load auth or accept work before reconciling.
+   quarantineReason = "GATEWAY_RECONCILIATION_PENDING"
+   bootstrapTimer = setTimeout(() => { bootstrapTask = reconcileBootstrap() }, Math.min(60000, bootstrapRetryMs * 2 ** Math.min(bootstrapRetries++, 3)))
+   bootstrapTimer.unref?.()
+   return
+  }
+  if (stopped) return
+  try {
+    if (!remote || typeof remote !== "object" || !Object.hasOwn(remote, "assignment") || (remote.assignment !== null && typeof remote.assignment !== "object")) throw new Error("Invalid gateway assignment response")
     const assigned = remote.assignment
     if (assigned) { validId(assigned.id); validId(assigned.tenantId); fence(assigned.fence) }
     const local = snapshot()
@@ -121,10 +147,15 @@ function createManagedWorker(options = {}) {
     try { files = await fs.promises.readdir(path.join(dataDir, "auth")) } catch (error) { if (error.code !== "ENOENT") throw error }
     let backups = []
     try { backups = await fs.promises.readdir(path.join(dataDir, "auth-backups")) } catch (error) { if (error.code !== "ENOENT") throw error }
+    if (stopped) return
     if (same) ownershipConfirmed = true
     if (local.state === "quarantined" || local.state === "draining" || (local.assignment && !same) || (!local.assignment && (files.length || backups.length))) throw new Error("Assignment reconciliation failed")
     await journal.update((data) => {
      data.assignment = assigned || null; data.state = assigned ? "assigned" : "unassigned"
+     // Losing a previously assigned journal means we cannot prove that an old
+     // linked device was revoked. Re-pairing for this owner remains possible;
+     // automated clean release/reuse must fail closed even after re-pairing.
+     data.localStateLost = local.localStateLost === true || Boolean(assigned && (!local.assignment || (local.pairingRequested && !files.includes("creds.json"))))
      for (const job of Object.values(data.jobs)) if (!TERMINAL.has(job.status)) {
       const uncertain = job.status === "sending"
       job.status = uncertain ? "unknown" : "failed"; job.updatedAt = now()
@@ -133,18 +164,20 @@ function createManagedWorker(options = {}) {
       data.outbox.push(eventFor(job, job.status, extras))
      }
     })
-    ownershipConfirmed = true; ready = true
+    if (stopped) return
+    ownershipConfirmed = true
     // Reconnect an already linked account only after durable ownership matches.
     if (same && files.includes("creds.json")) {
      const creds = JSON.parse(await fs.promises.readFile(path.join(dataDir, "auth", "creds.json"), "utf8"))
+     if (stopped) return
      if (creds.registered || creds.me?.id) await connection.startWhatsApp()
     }
+    if (stopped) return
+    ready = true; quarantineReason = null
     timer = setInterval(() => { void heartbeat(); void flush(); prune().catch(() => quarantine("JOURNAL_WRITE_FAILED")) }, 15000)
     timer.unref?.()
     void heartbeat(); void flush()
    } catch { await quarantine("BOOTSTRAP_RECONCILIATION_FAILED") }
-  })()
-  return boot
  }
  async function heartbeat() {
   if (heartbeatBusy || stopped || !journal) return
@@ -216,7 +249,7 @@ function createManagedWorker(options = {}) {
    if (body.fresh !== undefined && typeof body.fresh !== "boolean") throw managedError(400, "INVALID_FRESH", "fresh must be a boolean")
    const previous = snapshot().operations[body.operationId]
    if (!previous) {
-    await journal.update((data) => { data.operations[body.operationId] = { hash: fingerprint(body), result: { requested: true }, at: now() } })
+    await journal.update((data) => { data.pairingRequested = true; data.operations[body.operationId] = { hash: fingerprint(body), result: { requested: true }, at: now() } })
     await connection.startWhatsApp()
     await connection.requestQr({ fresh: body.fresh !== false, timeoutMs: 15000 })
    }
@@ -233,6 +266,11 @@ function createManagedWorker(options = {}) {
     return previous.result
    }
    assertAssignment(body, { allowDraining: true, allowQuarantined: true })
+   if (snapshot().localStateLost) {
+    await quarantine("SESSION_STATE_LOST")
+    void heartbeat()
+    throw managedError(503, "SESSION_STATE_LOST", "Previous session revocation cannot be confirmed after local storage loss; operator reconciliation is required")
+   }
    await journal.update((data) => { data.state = "draining" })
    try {
     let timeout
@@ -251,6 +289,7 @@ function createManagedWorker(options = {}) {
     const result = { clean: true, assignmentId: body.assignmentId, fence: body.fence }
     await journal.update((data) => {
      data.assignment = null; data.state = "unassigned"
+     data.pairingRequested = false; data.localStateLost = false
      // Cloudflare acknowledged all outcomes and remote logout was confirmed.
      // Remove tenant journal residue before this server enters the clean pool.
      data.jobs = {}; data.operations = {}
@@ -457,8 +496,12 @@ function createManagedWorker(options = {}) {
  }
  function shutdown() {
   if (shutdownPromise) return shutdownPromise
-  stopped = true; ready = false; clearInterval(timer)
+  stopped = true; ready = false; clearInterval(timer); clearTimeout(bootstrapTimer)
   shutdownPromise = (async () => {
+   // A bootstrap request can still be in flight when Render sends SIGTERM.
+   // Wait before closing its journal; stopped prevents late auth/socket starts.
+   await boot
+   await bootstrapTask
    let timeout
    await Promise.race([executing || Promise.resolve(), new Promise((resolve) => { timeout = setTimeout(resolve, drainMs) })])
    clearTimeout(timeout)

@@ -5,16 +5,22 @@ documents, stickers, locations, contact cards, and polls over an HTTP API.
 Validated requests enter a bounded local queue with per-session FIFO,
 concurrency limits, pacing, safe retries, and delivery/read status tracking.
 In standalone mode the queue is in memory: jobs and status records do not
-survive a process exit. Managed Render mode uses a durable file journal and
-Cloudflare-owned execution; see the [managed worker guide](docs/MANAGED_WORKER.md).
+survive a process exit. Managed Render mode uses a bounded file journal and
+Cloudflare-owned execution. Journal and WhatsApp credentials survive host
+replacement only when persistent storage is configured. The default Render
+template uses no disk for testing; see the
+[manual Render deployment guide](docs/RENDER_DEPLOYMENT.md).
 Node.js 24 was used to verify this project.
 Baileys is pinned to the tested security release `7.0.0-rc14`; the lockfile
 records the patched dependency versions. Use `npm ci` for repeatable installs.
 
 ## Documentation
 
+- [Manual Render deployment](docs/RENDER_DEPLOYMENT.md): private GitHub access,
+  Free/no-disk setup, exact environment variables, admin registration,
+  UptimeRobot, pairing and recovery.
 - [Managed Render worker](docs/MANAGED_WORKER.md): signed gateway protocol,
-  persistent deployment, ownership fencing, media ingestion and safe reuse.
+  storage modes, ownership fencing, media ingestion and safe reuse.
 - [Message API usage](docs/MESSAGE_API.md): setup, every request type, required
   and optional fields, Postman, cURL, PowerShell, backend examples, and errors.
 - [Postman collection](postman/Baileys-WhatsApp.postman_collection.json): import
@@ -30,6 +36,7 @@ records the patched dependency versions. Use `npm ci` for repeatable installs.
 
 ```powershell
 npm ci
+$env:API_KEY = "replace-with-your-own-random-key"
 npm start
 ```
 
@@ -39,14 +46,21 @@ server starts immediately, while WhatsApp connects in the background.
 No external queue or database is required. The default API accepts jobs with
 HTTP `202`; sending starts asynchronously when the session is connected.
 
-The fixed testing API key is in `config/apiKey.js`. Send it in the `x-api-key`
-header for every `/api` request. To use another fixed key without editing code,
-set `API_KEY` before starting Node:
+Configure your own fixed `API_KEY` through the environment. Send it in the
+`x-api-key` header for every standalone `/api` request:
 
 ```powershell
-$env:API_KEY = "your-shared-test-key"
+$env:API_KEY = "replace-with-your-own-random-key"
 npm start
 ```
+
+Managed deployments use a separate `WORKER_SECRET` and disable the standalone
+message and QR routes. Do not publish this repository: earlier Git history
+contains WhatsApp authentication files and logs even though the current files
+are ignored. Connect Render to the private repository through its GitHub
+integration. Anyone who previously received those credentials should be treated
+as having received access to the old linked device; revoke that device before
+pairing again.
 
 Authentication is stored in the project's `auth` directory using an absolute
 path, so changing the launch directory does not create a separate session.
@@ -195,6 +209,11 @@ returns `200` when the worker is accepting work, has queue capacity, and
 WhatsApp is connected; otherwise it returns `503`. Both are public and expose
 no QR, credentials, recipients, or message contents.
 
+In managed mode `/ready` instead checks the managed control/admission lifecycle;
+it can be ready while WhatsApp is awaiting pairing. `/ping` and the SaaS
+connection screen report WhatsApp connectivity separately. Render and
+UptimeRobot should monitor `/live`.
+
 `GET /ping` does not require an API key. It returns `200` only when WhatsApp
 is connected and `503` while starting, pairing, reconnecting, stopped, or
 requiring operator intervention. Responses are not cached.
@@ -241,15 +260,19 @@ in-flight sends become `unknown`; credentials are saved and the socket closes
 without logging out. A crash loses local jobs/statuses and may leave a send
 whose result cannot be recovered. Blindly recreating it risks a duplicate.
 
-On Render use `npm ci`, `npm start`, Node 24, and the supplied `PORT`.
-Use `/live` for the Render HTTP health check and monitor `/ready` separately,
-so pairing does not cause restart loops. Persist the actual source-root
-`auth` directory, run one process per account, and allow for deployment
-interruptions. Auth persistence does not make the queue durable. See
-[deployment details and verified Render references](docs/QUEUE.md#render-deployment-notes).
-The [Cloudflare plan](docs/CLOUDFLARE_INTEGRATION.md) describes the remaining
-work needed for durable tenant-aware orchestration; no D1 access or gateway
-deployment is required by this local worker.
+For the existing Cloudflare SaaS, follow the
+[manual Render deployment steps](docs/RENDER_DEPLOYMENT.md). Use Node 24,
+`npm ci --omit=dev`, `npm start`, the supplied `PORT`, one instance and `/live`
+as the health check. `render.yaml` defaults to Free/no disk with
+`MANAGED_STORAGE_MODE=ephemeral` and `DATA_DIR=/tmp/whatsapp-data`.
+WhatsApp credentials and unsent status callbacks can disappear after a host
+restart, replacement or redeploy; polling `/live` cannot preserve them.
+The optional [paid template](render.persistent.yaml) uses a persistent disk.
+
+The [queue deployment notes](docs/QUEUE.md#render-deployment-notes) describe the
+standalone local API. Its in-memory queue does not become durable merely by
+persisting auth. The local API requires no D1 access; the managed deployment
+uses the separately deployed Cloudflare gateway.
 
 CORS configuration is omitted for this testing setup. A browser on a different
 origin will need a backend proxy or later CORS configuration.

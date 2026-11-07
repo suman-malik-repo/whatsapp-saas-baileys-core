@@ -33,17 +33,45 @@ function createGatewayClient({ gatewayUrl, workerId, secret, fetchImpl = fetch, 
  if (base.protocol !== "https:" && !(base.protocol === "http:" && ["localhost", "127.0.0.1"].includes(base.hostname))) throw new Error("GATEWAY_URL requires HTTPS")
  if (base.username || base.password || base.search || base.hash || base.pathname !== "/") throw new Error("GATEWAY_URL must be an origin")
  return async (pathname, body, method = "POST") => {
+  const destination = new URL(pathname, base)
+  if (destination.origin !== base.origin || !destination.pathname.startsWith("/internal/v1/")) throw new Error("Invalid gateway operation path")
   const raw = body === undefined ? "" : JSON.stringify(body)
   const timestamp = String(now())
-  const response = await fetchImpl(new URL(pathname, base), {
+  let response
+  try { response = await fetchImpl(destination, {
    method, redirect: "error", signal: AbortSignal.timeout(15000),
    headers: { "content-type": "application/json", "x-worker-id": workerId, "x-timestamp": timestamp,
-    "x-signature": signature(secret, method, new URL(pathname, base).pathname, timestamp, raw) },
+    "x-signature": signature(secret, method, destination.pathname, timestamp, raw) },
    ...(body === undefined ? {} : { body: raw })
-  })
-  if (!response.ok) throw managedError(503, "GATEWAY_UNAVAILABLE", "Gateway rejected worker operation")
-  const text = await response.text()
-  if (text.length > 128 * 1024) throw new Error("Gateway response exceeds limit")
+  }) } catch { throw managedError(503, "GATEWAY_UNAVAILABLE", "Gateway could not be reached") }
+  if (!response.ok) {
+   await response.body?.cancel().catch(() => {})
+   throw managedError(503, "GATEWAY_UNAVAILABLE", "Gateway rejected worker operation")
+  }
+  // Count actual bytes, including chunked responses, before buffering JSON.
+  const maximum = 128 * 1024
+  if (Number(response.headers.get("content-length")) > maximum) {
+   await response.body?.cancel().catch(() => {})
+   throw managedError(502, "INVALID_GATEWAY_RESPONSE", "Gateway response exceeds limit")
+  }
+  const reader = response.body?.getReader(), chunks = []
+  let size = 0
+  if (reader) try {
+   while (true) {
+    const part = await reader.read()
+    if (part.done) break
+    size += part.value.byteLength
+    if (size > maximum) {
+     await reader.cancel().catch(() => {})
+     throw managedError(502, "INVALID_GATEWAY_RESPONSE", "Gateway response exceeds limit")
+    }
+    chunks.push(Buffer.from(part.value))
+   }
+  } catch (error) {
+   if (error.code === "INVALID_GATEWAY_RESPONSE") throw error
+   throw managedError(503, "GATEWAY_UNAVAILABLE", "Gateway response was interrupted")
+  } finally { reader.releaseLock() }
+  const text = Buffer.concat(chunks, size).toString("utf8")
   return text ? JSON.parse(text) : {}
  }
 }
